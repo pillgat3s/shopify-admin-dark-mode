@@ -1,0 +1,8 @@
+# Personal embedded-app origins. Kept local so private hostnames stay out of
+# the public repo -- see "Theming your own apps" in the README.
+local-apps.sh
+
+# Build output
+*.zip
+
+.DS_Store

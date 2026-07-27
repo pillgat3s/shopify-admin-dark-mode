@@ -1,0 +1,60 @@
+{
+  "manifest_version": 3,
+  "name": "Shopify Admin Dark Mode",
+  "version": "1.0.0",
+  "description": "Adds a dark mode toggle to the Shopify admin top bar, next to Sidekick.",
+  "homepage_url": "https://github.com/pillgat3s/shopify-admin-dark-mode",
+  "icons": {
+    "16": "icons/icon_16.png",
+    "32": "icons/icon_32.png",
+    "48": "icons/icon_48.png",
+    "128": "icons/icon_128.png"
+  },
+  "action": {
+    "default_title": "Shopify Admin Dark Mode",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon_16.png",
+      "32": "icons/icon_32.png",
+      "48": "icons/icon_48.png",
+      "128": "icons/icon_128.png"
+    }
+  },
+  "permissions": ["storage"],
+  "host_permissions": [
+    "https://admin.shopify.com/*",
+
+    "https://*.shopifyapps.com/*",
+    "https://loox.io/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["https://admin.shopify.com/*"],
+      "js": ["content.js"],
+      "css": ["theme.css"],
+      "run_at": "document_start",
+      "all_frames": false
+    },
+    {
+      "//": "Embedded apps. Each app iframe is the developer's own origin, so every app needs its own entry here and in host_permissions -- see 'Theming your own apps' in the README. content.js no-ops unless it is a frame inside admin.shopify.com.",
+      "matches": [
+        "https://*.shopifyapps.com/*",
+        "https://loox.io/*"
+      ],
+      "js": ["content.js"],
+      "css": ["theme.css"],
+      "run_at": "document_start",
+      "all_frames": true
+    }
+  ],
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "shopify-dark-mode@pillgates.dev",
+      "strict_min_version": "140.0",
+      "data_collection_permissions": {
+        "required": ["none"],
+        "optional": []
+      }
+    }
+  }
+}

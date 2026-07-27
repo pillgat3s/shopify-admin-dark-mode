@@ -1,0 +1,81 @@
+/* Shopify Admin Dark Mode
+ *
+ * Loaded at document_start so the page paints dark before Shopify's app
+ * boots. This is the whole point of the extension: no flashbang.
+ *
+ * Everything else is done by flipping Shopify's own `colorscheme` attribute
+ * on their <s-internal-theme-provider> web components (see content.js), so
+ * the colors below are only the pre-paint backstop and the toggle's styling.
+ */
+
+/* Pre-paint. `color-scheme: dark` also darkens native scrollbars, form
+ * controls and the canvas behind the app shell. */
+html.sdm-dark {
+  color-scheme: dark;
+  background-color: #0a0a0a;
+}
+
+html.sdm-dark body {
+  background-color: #0a0a0a;
+}
+
+/* --- embedded app frames ------------------------------------------------
+ *
+ * An app iframe is a third-party site with its own design system, so there
+ * is no palette to flip -- only a dark base to paint, after which the
+ * contrast guard repairs whatever that breaks (an app's white card holding
+ * now-light text gets measured as unreadable and darkened).
+ *
+ * Deliberately only the page-level surface and the inherited text colour.
+ * Forcing every background dark would wreck brand colours, logos and charts,
+ * and the guard reaches anything that genuinely became unreadable anyway. */
+html.sdm-app,
+html.sdm-app body {
+  background-color: #1a1a1a !important;
+}
+
+/* The forced ink colour is only applied to frames we repaint by hand.
+ * Shopify's own embedded apps are Polaris apps with the real token set, so
+ * they get the palette flipped instead and this would fight their own
+ * colours. */
+html.sdm-app-ink,
+html.sdm-app-ink body {
+  color: #e3e3e3;
+}
+
+/* --- Toggle button ------------------------------------------------------ */
+
+/* content.js copies the neighbouring top-bar button's class list onto our
+ * button, so it inherits Shopify's sizing, hover and focus styles for free.
+ * These rules only cover what that class list does not give us. */
+.sdm-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.sdm-toggle svg {
+  width: 20px;
+  height: 20px;
+  display: block;
+  /* Match the sibling top-bar icons, which are painted by currentColor. */
+  fill: currentColor;
+}
+
+/* Fallback styling for the case where the anchor button's classes could not
+ * be copied (Shopify renamed them). Keeps the button usable rather than
+ * invisible. */
+.sdm-toggle.sdm-toggle--unstyled {
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: #e3e3e3;
+}
+
+.sdm-toggle.sdm-toggle--unstyled:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
