@@ -1,0 +1,61 @@
+/* Deliberately styled after the admin's own dark surfaces, so opening this
+ * from the toolbar does not flash a white panel at someone who installed a
+ * dark mode extension. */
+
+:root {
+  color-scheme: dark;
+}
+
+body {
+  width: 260px;
+  margin: 0;
+  padding: 16px;
+  background: #1a1a1a;
+  color: #e3e3e3;
+  font: 13px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    system-ui, sans-serif;
+}
+
+h1 {
+  margin: 0 0 4px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.hint {
+  margin: 0 0 12px;
+  color: #a0a0a0;
+}
+
+.repo {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 9px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 8px;
+  background: #242424;
+  color: #e3e3e3;
+  font-weight: 500;
+  text-decoration: none;
+}
+
+.repo:hover {
+  background: #2f2f2f;
+}
+
+.repo:focus-visible {
+  outline: 2px solid #97adff;
+  outline-offset: 2px;
+}
+
+.arrow {
+  color: #a0a0a0;
+}
+
+.version {
+  margin: 12px 0 0;
+  color: #707070;
+  font-size: 12px;
+}
