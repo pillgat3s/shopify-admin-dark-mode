@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Shopify Admin Dark Mode",
-  "version": "1.0.0",
-  "description": "Adds a dark mode toggle to the Shopify admin top bar, next to Sidekick.",
+  "version": "1.2.0",
+  "description": "Adds a dark mode toggle to the Shopify admin and Partners dashboard.",
   "homepage_url": "https://github.com/pillgat3s/shopify-admin-dark-mode",
   "icons": {
     "16": "icons/icon_16.png",
@@ -20,18 +20,27 @@
       "128": "icons/icon_128.png"
     }
   },
-  "permissions": ["storage"],
+  "permissions": [
+    "storage"
+  ],
   "host_permissions": [
     "https://admin.shopify.com/*",
-
+    "https://partners.shopify.com/*",
     "https://*.shopifyapps.com/*",
     "https://loox.io/*"
   ],
   "content_scripts": [
     {
-      "matches": ["https://admin.shopify.com/*"],
-      "js": ["content.js"],
-      "css": ["theme.css"],
+      "matches": [
+        "https://admin.shopify.com/*",
+        "https://partners.shopify.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "css": [
+        "theme.css"
+      ],
       "run_at": "document_start",
       "all_frames": false
     },
@@ -41,8 +50,12 @@
         "https://*.shopifyapps.com/*",
         "https://loox.io/*"
       ],
-      "js": ["content.js"],
-      "css": ["theme.css"],
+      "js": [
+        "content.js"
+      ],
+      "css": [
+        "theme.css"
+      ],
       "run_at": "document_start",
       "all_frames": true
     }
@@ -52,7 +65,9 @@
       "id": "shopify-dark-mode@pillgates.dev",
       "strict_min_version": "140.0",
       "data_collection_permissions": {
-        "required": ["none"],
+        "required": [
+          "none"
+        ],
         "optional": []
       }
     }

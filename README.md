@@ -29,6 +29,40 @@ It is not on the Chrome Web Store, so there is no auto-update. New versions
 are published as releases here; the extension's toolbar popup links back to
 this page.
 
+## Surfaces
+
+| | |
+|---|---|
+| Shopify admin | `admin.shopify.com` |
+| Partners dashboard | `partners.shopify.com` |
+| Embedded apps | Shopify's own, plus any you add |
+
+## Three design systems, one decision
+
+Partners turned out to be three different apps on one domain, which is what
+forced the extension's shape:
+
+- the **org picker** is current Polaris and ships `.p-theme-dark-experimental`
+- the **dashboard** is Polaris v11 — old token naming (`--p-color-bg-subdued`),
+  and no dark rule anywhere in its CSS
+- **settings** and **themes** are Shopify's legacy `ui-*` system, with zero
+  `--p-*` properties at all
+
+So the extension does not decide by URL or by product. On every page it asks
+what is actually there, in order:
+
+1. **Does a dark palette ship?** Flip it. The admin and the org picker take
+   this path, and get colours Shopify's own designers picked.
+2. **Are there tokens but no dark palette?** Derive one — remap the tokens
+   themselves so components theme themselves off the new values, which
+   reaches hover and focus states no element pass would ever render.
+3. **Neither?** Repaint element by element, the same pass third-party apps
+   get.
+
+Steps 2 and 3 compose rather than compete: the element pass reads computed
+colour, so anything the tokens already darkened measures as dark and is
+skipped.
+
 ## How it works
 
 Two mechanisms, both Shopify's own:

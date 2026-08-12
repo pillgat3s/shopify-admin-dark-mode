@@ -43,6 +43,25 @@ html.sdm-app-ink body {
   color: #e3e3e3;
 }
 
+/* --- Wordmark ------------------------------------------------------------
+ *
+ * A Polaris top bar's logo is an <img> served from a CDN, so it is
+ * cross-origin and cannot be sampled the way canvases are -- reading it
+ * throws a SecurityError. It also cannot be recoloured, because it is image
+ * pixels rather than an icon font or inline SVG.
+ *
+ * Inverting is the only lever, and here the guess is a safe one: a Polaris
+ * app that ships no dark theme has a wordmark drawn for a white bar, so it
+ * is dark ink on transparent and vanishes against a dark one. On Shopify
+ * Partners that is exactly the case.
+ *
+ * `Polaris-TopBar__Logo` is a component class, not a CSS-module hash, so it
+ * is stable. This deliberately does not touch the admin, whose top bar was
+ * always dark and whose wordmark is already light. */
+html.sdm-dark img.Polaris-TopBar__Logo {
+  filter: invert(1) hue-rotate(180deg);
+}
+
 /* --- Toggle button ------------------------------------------------------ */
 
 /* content.js copies the neighbouring top-bar button's class list onto our
@@ -73,7 +92,10 @@ html.sdm-app-ink body {
   border: 0;
   border-radius: 8px;
   background: transparent;
-  color: #e3e3e3;
+  /* Inherit the bar's own text colour rather than assuming a dark bar. The
+   * Partners top bar is white until the theme is applied, and a hardcoded
+   * light icon would be invisible on it while dark mode is off. */
+  color: inherit;
 }
 
 .sdm-toggle.sdm-toggle--unstyled:hover {

@@ -39,13 +39,44 @@
   const STORAGE_KEY = 'sdm:enabled';
   const DARK_CLASS = 'sdm-dark';
 
-  /* Shopify's own dark token class. The un-suffixed name is applied too: the
-   * admin has begun emitting it and applying a class with no matching rule
-   * is free, so carrying both survives the rename either way. */
+  /* Shopify's own dark token classes, newest naming first.
+   *
+   * Which one exists depends on the Polaris vintage the page ships, and they
+   * differ per surface: the admin has `p-partial-theme-dark-experimental`,
+   * the Partners org picker has `p-theme-dark-experimental`, and the Partners
+   * dashboard -- an older Polaris v11 app -- has no dark token set at all.
+   * So the class is chosen by looking at what the page's own stylesheets
+   * actually define, and when none of them is there the palette is derived
+   * instead (see deriveDarkTokens). */
   const POLARIS_DARK_CLASSES = [
     'p-partial-theme-dark-experimental',
     'p-partial-theme-dark',
+    'p-theme-dark-experimental',
   ];
+
+  /* Resolved once the stylesheets are loaded. */
+  let darkThemeClass = null;
+
+  function detectDarkThemeClass() {
+    for (const sheet of document.styleSheets) {
+      let rules;
+      try {
+        rules = sheet.cssRules;
+      } catch (e) {
+        /* Cross-origin sheet -- unreadable, skip. */
+        continue;
+      }
+
+      for (const rule of rules) {
+        if (!rule.selectorText) continue;
+        for (const cls of POLARIS_DARK_CLASSES) {
+          if (rule.selectorText.includes('.' + cls)) return cls;
+        }
+      }
+    }
+
+    return null;
+  }
 
   const PROVIDER = 's-internal-theme-provider';
 
@@ -110,10 +141,23 @@
     );
   }
 
-  /* Flip Shopify's palette (admin, and Shopify's own apps) versus remap
-   * someone else's neutrals (everything third-party). */
+  /* Whether Shopify's own token classes and theme providers apply here. */
   const usesPolarisTheme = () => IS_TOP_FRAME || isPolarisFrame;
-  const usesGenericRepaint = () => IS_APP_FRAME && !isPolarisFrame;
+
+  /* Whether to remap colours element by element.
+   *
+   * Keyed on "did we find a dark palette to flip", not on what kind of page
+   * this is. Partners turned out to be three design systems on one domain:
+   * the org picker is current Polaris with a dark theme, the dashboard is
+   * Polaris v11 with tokens but no dark theme, and settings and themes are
+   * the legacy `ui-*` system with no Polaris tokens at all -- zero `--p-*`
+   * properties, so there is nothing to derive from either.
+   *
+   * Whenever no palette was found, the element pass is what covers the page,
+   * and it composes with token derivation rather than competing: it reads
+   * computed colours, so anything the tokens already darkened is measured as
+   * dark and skipped. */
+  const usesGenericRepaint = () => !darkThemeClass;
 
   /* --- preference --------------------------------------------------------
    *
@@ -195,8 +239,12 @@
     }
 
     if (usesPolarisTheme()) {
+      /* Before detection has run, apply all of them -- one will be the right
+       * one and the rest match no rule, which costs nothing and means the
+       * page is themed on the very first frame rather than after a scan. */
+      const classes = darkThemeClass ? [darkThemeClass] : POLARIS_DARK_CLASSES;
       POLARIS_DARK_CLASSES.forEach((cls) =>
-        root.classList.toggle(cls, enabled)
+        root.classList.toggle(cls, enabled && classes.includes(cls))
       );
     }
   }
@@ -435,8 +483,20 @@
     return null;
   }
 
+  /* null means "the document scope".
+   *
+   * The host check is not defensive padding -- it is the whole reason this
+   * function is safe to call on a mutation record. `getRootNode()` on a node
+   * React has already detached returns that detached tree's root, which is a
+   * plain element or fragment with no `.host`. Reading `.host.tagName` there
+   * throws, and this used to run first thing inside the MutationObserver
+   * callback: one detached node in a batch took down the entire pass. During
+   * React's initial render storm that is every batch, so the observer never
+   * reached `schedule()` and the extension silently did nothing after
+   * document_start -- no toggle button, no contrast guard, no app repaint. */
   function scopeKeyFor(node) {
-    return node === document ? null : node.host.tagName.toLowerCase();
+    if (!node || node === document) return null;
+    return node.host ? node.host.tagName.toLowerCase() : null;
   }
 
   /* Rules are stored per selector *per property*, not as one declaration
@@ -739,6 +799,90 @@
       rect.height >= CANVAS_ASSUME_LIGHT_MIN_PX;
   }
 
+  /* --- derived palette ----------------------------------------------------
+   *
+   * For a Polaris page that ships no dark token set. The Partners dashboard
+   * is one: Polaris v11 naming (`--p-color-bg-subdued`), 135 colour tokens,
+   * and not a single dark rule anywhere in its CSS.
+   *
+   * Rather than repaint element by element, the tokens themselves are
+   * remapped once. The components then theme themselves off the new values,
+   * which is both far cheaper and far more complete -- it reaches states we
+   * never render, like hover and focus colours, and survives any re-render.
+   *
+   * This still is not inventing a palette. Every value is derived from
+   * Shopify's own light value through the same neutral remap used for app
+   * frames: neutrals flip, anything chromatic is left alone, so brand greens,
+   * status colours and link blues come through untouched.
+   */
+  const DERIVED_STYLE_ID = 'sdm-derived-tokens';
+
+  /* `:root` is a pseudo-class, so it beats a bare `html` type selector and
+   * our overrides would silently lose the cascade. Repeating it outranks
+   * Polaris's own `:root` block with room to spare. */
+  const DERIVED_SELECTOR = 'html.' + DARK_CLASS + ':root:root';
+
+  let derivedStyle = null;
+
+  /* Computed once and reused.
+   *
+   * Not just an optimisation: the derived rule is what makes the tokens dark,
+   * so a second pass would read its own output as the input and map those
+   * dark values back to light. Deriving strictly from the page's original
+   * light palette is the only stable version. */
+  let derivedDeclarations = null;
+
+  function deriveDarkTokens() {
+    if (derivedDeclarations) {
+      writeDerivedTokens();
+      return;
+    }
+
+    /* Measure with our own overrides switched off, so what we read is the
+     * page's palette rather than a previous derivation. */
+    if (derivedStyle) derivedStyle.textContent = '';
+
+    const computed = getComputedStyle(root);
+    const declarations = [];
+
+    for (const property of computed) {
+      if (!property.startsWith('--p-')) continue;
+
+      const color = parseColor(computed.getPropertyValue(property));
+      if (!color || color.a < 0.05) continue;
+      if (chroma(color) > NEUTRAL_CHROMA) continue;
+
+      const mapped = relativeLuminance(color) > 0.5
+        ? darkenSurface(color)
+        : lightenInk(color);
+
+      /* darkenSurface/lightenInk return opaque rgb(); carry the original
+       * alpha so translucent scrims and dividers stay translucent. */
+      const [r, g, b] = mapped.match(/\d+/g);
+      declarations.push(
+        `${property}: rgba(${r}, ${g}, ${b}, ${color.a});`
+      );
+    }
+
+    if (!declarations.length) return;
+
+    derivedDeclarations = declarations;
+    writeDerivedTokens();
+  }
+
+  function writeDerivedTokens() {
+    if (!derivedDeclarations) return;
+
+    if (!derivedStyle || !derivedStyle.isConnected) {
+      derivedStyle = document.createElement('style');
+      derivedStyle.id = DERIVED_STYLE_ID;
+      (document.head || root).appendChild(derivedStyle);
+    }
+
+    derivedStyle.textContent =
+      `${DERIVED_SELECTOR} { ${derivedDeclarations.join(' ')} }`;
+  }
+
   /* Remaps one element's neutral colours. Only for third-party app frames. */
   function repaintAppElement(
     element, style, target, selector, carriesText, write, scopeKey, currentRoot
@@ -788,8 +932,30 @@
     write(scopeKey, currentRoot, selector, 'color', lightenInk(ink));
   }
 
+  /* A route that lazy-loads its own stylesheet can introduce tokens the first
+   * derivation never saw, leaving that part of the page light. Re-deriving
+   * when the sheet count moves keeps subpages covered.
+   *
+   * Safe to do mid-session: clearing and rewriting inside one task means the
+   * browser recalculates style but never paints the intermediate light
+   * state. */
+  let lastSheetCount = 0;
+
+  function refreshDerivedTokens() {
+    if (!enabled || !usesPolarisTheme() || darkThemeClass) return;
+
+    const count = document.styleSheets.length;
+    if (count === lastSheetCount) return;
+
+    lastSheetCount = count;
+    derivedDeclarations = null;
+    deriveDarkTokens();
+  }
+
   function contrastGuard() {
     if (!enabled) return;
+
+    refreshDerivedTokens();
 
     let scanned = 0;
     const dirtyScopes = new Set();
@@ -892,8 +1058,17 @@
 
         /* The pair is unreadable. Which half is stale? */
         if (relativeLuminance(background.color) > 0.5) {
-          /* A light surface that never got the dark treatment (the white
-           * `.card` in s-metrics-bar). Darken the element that paints it. */
+          if (chroma(background.color) > NEUTRAL_CHROMA) {
+            /* A light *brand* surface -- a Draft badge, a status pill. The
+             * colour is the point, so it stays and the ink moves instead.
+             * Darkening the badge would make it readable by destroying the
+             * thing it was communicating. */
+            write(scopeKey, currentRoot, selector, 'color', 'rgb(26, 26, 26)');
+            continue;
+          }
+
+          /* A light neutral surface that never got the dark treatment (the
+           * white `.card` in s-metrics-bar). Darken the element painting it. */
           const owner = styleTargetFor(background.owner);
           if (!owner) continue;
 
@@ -938,10 +1113,22 @@
 
   /* `name="sidekickButton"` is the stable handle: aria-labels are translated
    * and the top-bar class names are hashed per deploy. */
+  /* The first two are the admin; the last is the Partners dashboard, whose
+   * top bar is stock Polaris. `Polaris-TopBar-Menu__Activator` is a component
+   * class rather than a CSS-module hash, so unlike the admin's
+   * `_TopBarButton_v70_1` it does not churn between deploys. */
   const ANCHORS = [
     'button[name="sidekickButton"]',
     'button[aria-controls="sidekick"]',
     'button[aria-label^="Alerts Feed"]',
+    '.Polaris-TopBar-Menu__Activator',
+    /* Partners' older pages (settings, themes) are not Polaris at all -- they
+     * run Shopify's legacy `ui-*` system with its own top bar. Anchor on the
+     * notifications bell rather than `.ui-top-bar__item`: the first item in
+     * DOM order is the logo on the far left, which is where the toggle ends
+     * up if you match on the container. */
+    '.NotificationsBellContainer',
+    '.ui-top-bar__item',
   ];
 
   const MOON = '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M8.5 2.6a.75.75 0 0 0-.9-.98 8 8 0 1 0 9.78 9.78.75.75 0 0 0-.98-.9A6.5 6.5 0 0 1 8.5 2.6Z"/></svg>';
@@ -1025,6 +1212,8 @@
     /* Every previous verdict was measured in the other theme. */
     judged.clear();
 
+    if (usesPolarisTheme() && !darkThemeClass && enabled) deriveDarkTokens();
+
     if (enabled) contrastGuard();
     else clearGuard();
 
@@ -1034,15 +1223,15 @@
   /* Cheap work runs on every batch; the deep contrast scan is throttled
    * separately because it is the only part that touches layout. */
   function refreshFast() {
-    /* A third-party app has no providers to flip and no top bar to hang a
-     * button on -- it only runs the repaint pass. */
-    if (usesGenericRepaint()) return;
+    /* Only meaningful where Shopify's own theming exists to be flipped. */
+    if (usesPolarisTheme()) {
+      applyNestedLightScopes();
+      applyProviders(lightDomProviders());
+    }
 
-    applyNestedLightScopes();
-    applyProviders(lightDomProviders());
-
-    /* Only the admin has a metrics bar to seed and a top bar to inject into.
-     * Shopify's embedded apps share the palette, not the chrome. */
+    /* Every top-level surface gets a toggle -- admin and Partners alike.
+     * This used to sit behind the repaint check, which meant Partners pages
+     * with no dark palette were themed but had no way to switch back. */
     if (IS_TOP_FRAME) {
       /* Runs every frame rather than on the throttled guard, so a freshly
        * mounted metrics bar is dark on the frame it appears. */
@@ -1084,21 +1273,69 @@
 
   const observer = new MutationObserver((records) => {
     /* A scope that changed has to be re-measured: its verdicts were recorded
-     * against whatever colours it had before the change. */
-    for (const record of records) forgetScope(record.target);
+     * against whatever colours it had before the change.
+     *
+     * Wrapped because this callback is the extension's heartbeat. Anything
+     * that throws in here stops `schedule()` from being reached, and since
+     * the admin only mutates in bursts, missing those bursts means the
+     * extension goes dormant until the next full page load. Bookkeeping is
+     * never worth that -- a stale verdict costs one wrong colour, a dead
+     * observer costs everything. */
+    try {
+      for (const record of records) forgetScope(record.target);
+    } catch (e) {
+      /* Re-measure everything rather than guess what got missed. */
+      judged.clear();
+    }
+
     schedule();
   });
 
+  /* Polls briefly for the top bar, then stops. Deliberately short-lived: the
+   * observer is the real mechanism, this only covers its first few seconds. */
+  const TOP_BAR_POLL_MS = 250;
+  const TOP_BAR_TIMEOUT_MS = 15000;
+
+  function waitForTopBar() {
+    const started = Date.now();
+
+    const timer = setInterval(() => {
+      const found = document.getElementById(BUTTON_ID);
+      if (found || Date.now() - started > TOP_BAR_TIMEOUT_MS) {
+        clearInterval(timer);
+        return;
+      }
+      ensureButton();
+    }, TOP_BAR_POLL_MS);
+  }
+
   function start() {
     /* Stylesheets have loaded by now, so the Polaris tokens are finally
-     * visible and the frame can pick its theming path. */
+     * visible and the page can pick its theming path. */
     if (IS_APP_FRAME && detectPolaris()) {
       isPolarisFrame = true;
+    }
+
+    if (usesPolarisTheme()) {
+      darkThemeClass = detectDarkThemeClass();
+      applyRootClasses();
+
+      /* No dark token set ships on this page -- derive one from its own
+       * light values instead. */
+      if (!darkThemeClass && enabled) deriveDarkTokens();
+    } else {
       applyRootClasses();
     }
 
     refreshFast();
     if (enabled) contrastGuard();
+
+    /* The admin's top bar is React-rendered, so at DOMContentLoaded there is
+     * usually no Sidekick button to anchor to yet and the mutation observer
+     * is what picks it up. This is a bounded fallback for the case where
+     * that render produces no record we see -- without it, a single missed
+     * burst means no toggle for the whole page life, with no way back. */
+    if (IS_TOP_FRAME) waitForTopBar();
 
     observer.observe(document.body, {
       childList: true,
