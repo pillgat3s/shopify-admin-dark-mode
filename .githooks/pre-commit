@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Blocks committing personal app origins into the public manifest.
+#
+# local-apps.sh patches manifest.json to add your own embedded apps, and
+# manifest.json is tracked -- so a routine `git add manifest.json` silently
+# publishes those hostnames. That already happened once.
+set -euo pipefail
+
+staged=$(git diff --cached --name-only)
+echo "$staged" | grep -q '^manifest.json$' || exit 0
+
+leaks=$(git show :manifest.json | grep -nE 'railway\.app|workers\.dev|ngrok|trycloudflare' || true)
+[ -z "$leaks" ] && exit 0
+
+cat >&2 <<MSG
+BLOCKED: manifest.json contains personal app origins.
+
+$leaks
+
+Run  ./local-apps.sh --revert  before committing, then re-apply it after.
+To override (you almost never want to):  git commit --no-verify
+MSG
+exit 1
