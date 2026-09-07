@@ -78,6 +78,24 @@ Two mechanisms, both Shopify's own:
 
 New admin surfaces get themed for free, as long as they read the tokens.
 
+### The toggle
+
+Two places, one code path: the button in the admin top bar next to Sidekick,
+and a switch in the extension's toolbar popup. Both just flip one value in
+`chrome.storage`; every admin tab and embedded app frame listens for that
+change and applies it. The popup needs no page markup at all, so it works
+regardless of what Shopify does to the top bar.
+
+The in-page button anchors on `name="sidekickButton"` and copies its
+neighbour's classes at runtime — hashed class names are read, never relied
+on. Shopify's top-bar buttons sit in a stack of wrappers each exactly as wide
+as the button inside, and one redesign of that stack left the toggle clipped
+and pushed Sidekick itself off the bar. So the extension no longer trusts the
+insertion: it **measures** where the toggle landed. If it is not inside the
+bar, or the anchor no longer is, it removes itself and falls back to a
+fixed-position button that depends on nothing of Shopify's. A future
+redesign can move the toggle to the corner; it cannot remove it.
+
 ### The contrast guard
 
 Some components hardcode a light colour instead of reading a token.

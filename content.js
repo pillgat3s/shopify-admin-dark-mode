@@ -1144,9 +1144,9 @@
      * Shopify's exact sizing, hover and focus-ring styling for free. If those
      * class names ever change shape, fall back to our own styling rather than
      * rendering an unstyled button. */
-    const inherited = Array.from(anchor.classList).filter((cls) =>
-      cls.startsWith('_TopBarButton_')
-    );
+    const inherited = anchor
+      ? Array.from(anchor.classList).filter((cls) => cls.startsWith('_TopBarButton_'))
+      : [];
 
     button.className = inherited.length
       ? `${inherited.join(' ')} sdm-toggle`
@@ -1175,23 +1175,155 @@
     button.setAttribute('title', label);
   }
 
+  function findAnchor() {
+    for (const selector of ANCHORS) {
+      /* Shopify keeps a zero-width duplicate of some buttons around; the
+       * visible one is the only one worth anchoring to. */
+      for (const el of document.querySelectorAll(selector)) {
+        if (el.parentElement && el.getBoundingClientRect().width > 0) return el;
+      }
+    }
+    return null;
+  }
+
+  /* --- placement self-check -----------------------------------------------
+   *
+   * Anchoring on Shopify's markup is the nicest result and the most fragile
+   * one: a change to their wrapper structure can leave the toggle clipped,
+   * off the bar, or -- as actually happened -- shove Sidekick itself out of
+   * view. Rather than trusting the insertion, measure it. If the toggle is
+   * not sitting inside the bar, or the anchor no longer is, tear it out and
+   * fall back to a fixed-position button that depends on nothing of theirs.
+   * Worst case after any future redesign is a toggle in the top-right corner,
+   * never a missing one. */
+  const BAR_HEIGHT = 48;
+  const PLACEMENT_CHECK_MS = 1000;
+  let lastPlacementCheck = 0;
+
+  function sitsInBar(el) {
+    const r = el.getBoundingClientRect();
+    return r.width > 0 && r.height > 0 && r.top >= 0 && r.bottom <= BAR_HEIGHT;
+  }
+
+  function placementLooksRight(button, anchor) {
+    if (!sitsInBar(button)) return false;
+    if (anchor && anchor.isConnected && !sitsInBar(anchor)) return false;
+    return true;
+  }
+
+  function removeButton() {
+    const existing = document.getElementById(BUTTON_ID);
+    if (!existing) return;
+    (existing.closest('.sdm-toggle-wrap') || existing).remove();
+  }
+
+  function placeFloating() {
+    const button = buildButton(null);
+    paintButton(button);
+    button.classList.add('sdm-toggle--floating');
+    button.dataset.sdmPlacement = 'floating';
+
+    /* Sit just left of whatever top-right cluster exists so the bell and
+     * account menu stay uncovered. */
+    let leftMost = Infinity;
+    for (const el of document.querySelectorAll('button, a')) {
+      const r = el.getBoundingClientRect();
+      if (r.width > 0 && r.top >= 0 && r.bottom <= BAR_HEIGHT &&
+          r.left > innerWidth * 0.6) {
+        leftMost = Math.min(leftMost, r.left);
+      }
+    }
+    const right = leftMost === Infinity ? 16 : Math.max(16, innerWidth - leftMost + 8);
+    button.style.right = right + 'px';
+
+    document.body.appendChild(button);
+  }
+
   function ensureButton() {
     const existing = document.getElementById(BUTTON_ID);
     if (existing && existing.isConnected) {
       paintButton(existing);
+
+      /* A later re-render can move the wrapper we cloned into. Re-measure
+       * occasionally; the floating placement is already self-contained. */
+      if (existing.dataset.sdmPlacement === 'anchor' &&
+          Date.now() - lastPlacementCheck > PLACEMENT_CHECK_MS) {
+        lastPlacementCheck = Date.now();
+        if (!placementLooksRight(existing, findAnchor())) {
+          removeButton();
+          placeFloating();
+        }
+      }
       return;
     }
 
-    let anchor = null;
-    for (const selector of ANCHORS) {
-      anchor = document.querySelector(selector);
-      if (anchor) break;
-    }
-    if (!anchor || !anchor.parentElement) return;
+    const anchor = findAnchor();
+    /* No anchor yet: the bar may still be rendering. waitForTopBar falls
+     * back to a floating toggle if it never shows up. */
+    if (!anchor) return;
 
     const button = buildButton(anchor);
     paintButton(button);
-    anchor.parentElement.insertBefore(button, anchor);
+    button.dataset.sdmPlacement = 'anchor';
+
+    const item = rowItemFor(anchor);
+    item.parentElement.insertBefore(wrapLikeAnchor(anchor, item, button), item);
+
+    if (!placementLooksRight(button, anchor)) {
+      removeButton();
+      placeFloating();
+    }
+  }
+
+  /* The admin's top-bar buttons sit inside a stack of decorative wrappers
+   * (`_ButtonWrapper_` > `_Square_` > `_BorderGradient_`), each exactly as
+   * wide as the button it holds. Inserting next to the anchor *inside* that
+   * stack was the bug: the 36px square wrapped onto a second line, our
+   * toggle landed below the bar, and it pushed Sidekick itself out of view
+   * with it. Climb until the parent is genuinely wider than the item -- that
+   * is the row -- and insert there. */
+  function rowItemFor(anchor) {
+    let item = anchor;
+
+    while (item.parentElement) {
+      const parentWidth = item.parentElement.getBoundingClientRect().width;
+      const itemWidth = item.getBoundingClientRect().width;
+      if (parentWidth > itemWidth + 8) break;
+      item = item.parentElement;
+    }
+
+    return item;
+  }
+
+  /* Rebuild the anchor's wrapper stack around our button, so it gets the
+   * same square, gradient border and hover treatment as its neighbours
+   * instead of rendering as a bare 18px icon beside a 36px square. Empty
+   * clones only -- class names are copied, none of Shopify's children. */
+  function wrapLikeAnchor(anchor, item, button) {
+    const levels = [];
+    let node = item;
+
+    while (node && node !== anchor) {
+      levels.push(node);
+      node = Array.from(node.children).find((c) => c.contains(anchor)) || null;
+    }
+
+    if (!levels.length) return button;
+
+    let outer = null;
+    let inner = null;
+
+    for (const level of levels) {
+      const clone = level.cloneNode(false);
+      clone.removeAttribute('id');
+      if (outer) inner.appendChild(clone);
+      else outer = clone;
+      inner = clone;
+    }
+
+    outer.classList.add('sdm-toggle-wrap');
+    inner.appendChild(button);
+    return outer;
   }
 
   /* --- wiring ------------------------------------------------------------ */
@@ -1300,11 +1432,19 @@
     const started = Date.now();
 
     const timer = setInterval(() => {
-      const found = document.getElementById(BUTTON_ID);
-      if (found || Date.now() - started > TOP_BAR_TIMEOUT_MS) {
+      if (document.getElementById(BUTTON_ID)) {
         clearInterval(timer);
         return;
       }
+
+      if (Date.now() - started > TOP_BAR_TIMEOUT_MS) {
+        clearInterval(timer);
+        /* Nothing we recognise ever rendered. A toggle that is merely in
+         * the corner beats one that does not exist. */
+        placeFloating();
+        return;
+      }
+
       ensureButton();
     }, TOP_BAR_POLL_MS);
   }

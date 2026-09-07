@@ -98,6 +98,27 @@ html.sdm-dark img.Polaris-TopBar__Logo {
   color: inherit;
 }
 
+/* Fallback placement, used when anchoring on Shopify's markup measured as
+ * broken or nothing recognisable rendered. Depends on none of their classes,
+ * so a redesign can move the toggle to the corner but never remove it. */
+.sdm-toggle.sdm-toggle--floating {
+  position: fixed;
+  top: 10px;
+  z-index: 2147483000;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: rgba(26, 26, 26, 0.92);
+  color: #e3e3e3;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.16);
+}
+
+.sdm-toggle.sdm-toggle--floating:hover {
+  background: rgba(47, 47, 47, 0.95);
+}
+
 .sdm-toggle.sdm-toggle--unstyled:hover {
   background: rgba(255, 255, 255, 0.12);
 }

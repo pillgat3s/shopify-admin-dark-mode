@@ -6,3 +6,6 @@ local-apps.sh
 *.zip
 
 .DS_Store
+store-listing.md
+store-screenshots/
+make-screenshots.sh
