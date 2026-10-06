@@ -54,10 +54,51 @@
     'p-theme-dark-experimental',
   ];
 
-  /* Resolved once the stylesheets are loaded. */
-  let darkThemeClass = null;
+  /* Shopify's newer admin ("admin-next": sidebar search, account menu
+   * bottom-left, no global top bar) themes itself differently. It puts a
+   * base class on <html> plus a light/dark *variant*, and ships a complete
+   * dark palette for it -- 467 declarations, every token the base defines.
+   *
+   * Dark mode there is not "add a dark class": the `-light` variant has to
+   * come off as well, because `:root.p-partial-theme-admin-next-light`
+   * re-declares the light tokens at a specificity that beats the standalone
+   * dark classes above. With both variants present, whichever Shopify
+   * ordered last wins, and that is the light one.
+   *
+   * The variant is only applied when its base class is present. The same
+   * CSS bundle defines it on the classic admin too, where forcing a palette
+   * built for different chrome would be a guess. */
+  const THEME_VARIANTS = [
+    {
+      base: 'p-partial-theme-admin-next',
+      light: 'p-partial-theme-admin-next-light',
+      dark: 'p-partial-theme-admin-next-dark',
+    },
+  ];
 
-  function detectDarkThemeClass() {
+  /* Light variants we removed, so turning dark mode off can put them back
+   * rather than leaving the page with no variant at all. */
+  const removedLightVariants = new Set();
+
+  /* null until the stylesheets have been scanned; [] when none ship. */
+  let darkThemeClasses = null;
+
+  const hasDarkTheme = () =>
+    Array.isArray(darkThemeClasses) && darkThemeClasses.length > 0;
+
+  function activeVariants() {
+    return THEME_VARIANTS.filter((v) =>
+      root.classList.contains(v.base) || root.classList.contains(v.dark)
+    );
+  }
+
+  /* Every dark class the page can honour, not just the first. A class with
+   * no matching rule costs nothing, and on the newer admin the standalone
+   * experimental class is a useful backstop under the variant palette for
+   * the handful of tokens only it defines. */
+  function detectDarkThemeClasses() {
+    const found = new Set();
+
     for (const sheet of document.styleSheets) {
       let rules;
       try {
@@ -70,12 +111,14 @@
       for (const rule of rules) {
         if (!rule.selectorText) continue;
         for (const cls of POLARIS_DARK_CLASSES) {
-          if (rule.selectorText.includes('.' + cls)) return cls;
+          if (rule.selectorText.includes('.' + cls)) found.add(cls);
         }
       }
     }
 
-    return null;
+    for (const v of activeVariants()) found.add(v.dark);
+
+    return Array.from(found);
   }
 
   const PROVIDER = 's-internal-theme-provider';
@@ -157,7 +200,7 @@
    * and it composes with token derivation rather than competing: it reads
    * computed colours, so anything the tokens already darkened is measured as
    * dark and skipped. */
-  const usesGenericRepaint = () => !darkThemeClass;
+  const usesGenericRepaint = () => !hasDarkTheme();
 
   /* --- preference --------------------------------------------------------
    *
@@ -242,11 +285,39 @@
       /* Before detection has run, apply all of them -- one will be the right
        * one and the rest match no rule, which costs nothing and means the
        * page is themed on the very first frame rather than after a scan. */
-      const classes = darkThemeClass ? [darkThemeClass] : POLARIS_DARK_CLASSES;
+      const classes = hasDarkTheme() ? darkThemeClasses : POLARIS_DARK_CLASSES;
       POLARIS_DARK_CLASSES.forEach((cls) =>
         root.classList.toggle(cls, enabled && classes.includes(cls))
       );
+
+      for (const v of activeVariants()) {
+        root.classList.toggle(v.dark, enabled);
+
+        if (enabled) {
+          if (root.classList.contains(v.light)) {
+            root.classList.remove(v.light);
+            removedLightVariants.add(v.light);
+          }
+        } else if (removedLightVariants.has(v.light)) {
+          root.classList.add(v.light);
+          removedLightVariants.delete(v.light);
+        }
+      }
     }
+  }
+
+  /* Whether <html>'s classes match what `enabled` says they should be. The
+   * root observer uses this so it only re-applies on a real drift -- calling
+   * applyRootClasses unconditionally from a class-attribute observer would
+   * loop. */
+  function rootClassesDrifted() {
+    if (!enabled) return false;
+    if (!root.classList.contains(DARK_CLASS)) return true;
+    for (const v of activeVariants()) {
+      if (!root.classList.contains(v.dark)) return true;
+      if (root.classList.contains(v.light)) return true;
+    }
+    return false;
   }
 
   /* Theme providers emit nested `.p-theme-light` containers, and that class
@@ -942,12 +1013,32 @@
   let lastSheetCount = 0;
 
   function refreshDerivedTokens() {
-    if (!enabled || !usesPolarisTheme() || darkThemeClass) return;
+    if (!enabled || !usesPolarisTheme()) return;
 
     const count = document.styleSheets.length;
     if (count === lastSheetCount) return;
-
     lastSheetCount = count;
+
+    /* The admin loads its main stylesheet after DOMContentLoaded, so the
+     * scan in start() can run against a nearly empty cascade, find no dark
+     * class, and derive a palette from the handful of tokens that happen to
+     * exist. That derived rule outranks Shopify's own once theirs arrives --
+     * it has to, to beat the light tokens -- so it must step aside the
+     * moment a real palette is detected. Likewise any element-repaint rules
+     * written in the meantime were measured against the wrong colours. */
+    const before = hasDarkTheme();
+    darkThemeClasses = detectDarkThemeClasses();
+
+    if (hasDarkTheme()) {
+      if (!before) {
+        applyRootClasses();
+        if (derivedStyle) derivedStyle.textContent = '';
+        derivedDeclarations = null;
+        clearGuard();
+      }
+      return;
+    }
+
     derivedDeclarations = null;
     deriveDarkTokens();
   }
@@ -1205,9 +1296,39 @@
     return r.width > 0 && r.height > 0 && r.top >= 0 && r.bottom <= BAR_HEIGHT;
   }
 
-  function placementLooksRight(button, anchor) {
-    if (!sitsInBar(button)) return false;
-    if (anchor && anchor.isConnected && !sitsInBar(anchor)) return false;
+  /* The newer admin moved the bell and account menu to the bottom-left of
+   * the sidebar, so "is it in the top bar" became the wrong question -- it
+   * sent a correctly placed toggle to the floating fallback. The question
+   * that holds across layouts is: did the toggle land beside its anchor, and
+   * did inserting it leave the anchor where it was? The second half is the
+   * exact regression that happened before, when the insertion wrapped
+   * Sidekick onto a second line. */
+  const ADJACENT_MAX_GAP = 80;
+
+  function onScreen(rect) {
+    return rect.width > 0 && rect.height > 0 &&
+      rect.bottom > 0 && rect.top < innerHeight &&
+      rect.right > 0 && rect.left < innerWidth;
+  }
+
+  function placementLooksRight(button, anchor, anchorBefore) {
+    const b = button.getBoundingClientRect();
+    if (!onScreen(b)) return false;
+
+    if (!anchor || !anchor.isConnected) return true;
+    const a = anchor.getBoundingClientRect();
+    /* Anchor hidden (collapsed sidebar, responsive layout): nothing to
+     * measure against, and a visible toggle is still the right outcome. */
+    if (a.width === 0) return true;
+
+    const overlapY = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top);
+    if (overlapY < Math.min(a.height, b.height) * 0.5) return false;
+
+    const gap = Math.max(a.left - b.right, b.left - a.right);
+    if (gap > ADJACENT_MAX_GAP) return false;
+
+    if (anchorBefore && Math.abs(anchorBefore.top - a.top) > 2) return false;
+
     return true;
   }
 
@@ -1226,7 +1347,8 @@
     /* Sit just left of whatever top-right cluster exists so the bell and
      * account menu stay uncovered. */
     let leftMost = Infinity;
-    for (const el of document.querySelectorAll('button, a')) {
+    const controls = 'button, a, [role="button"], s-button, s-clickable';
+    for (const el of document.querySelectorAll(controls)) {
       const r = el.getBoundingClientRect();
       if (r.width > 0 && r.top >= 0 && r.bottom <= BAR_HEIGHT &&
           r.left > innerWidth * 0.6) {
@@ -1266,10 +1388,11 @@
     paintButton(button);
     button.dataset.sdmPlacement = 'anchor';
 
+    const anchorBefore = anchor.getBoundingClientRect();
     const item = rowItemFor(anchor);
     item.parentElement.insertBefore(wrapLikeAnchor(anchor, item, button), item);
 
-    if (!placementLooksRight(button, anchor)) {
+    if (!placementLooksRight(button, anchor, anchorBefore)) {
       removeButton();
       placeFloating();
     }
@@ -1284,12 +1407,24 @@
    * is the row -- and insert there. */
   function rowItemFor(anchor) {
     let item = anchor;
+    let itemWidth = anchor.getBoundingClientRect().width;
 
     while (item.parentElement) {
-      const parentWidth = item.parentElement.getBoundingClientRect().width;
-      const itemWidth = item.getBoundingClientRect().width;
+      const parent = item.parentElement;
+      const parentWidth = parent.getBoundingClientRect().width;
+
+      /* The newer admin wraps each button in an <s-internal-theme-provider>
+       * with `display: contents` -- no box of its own, so its width reads as
+       * zero and would otherwise look like the end of the stack. Climb
+       * through it and keep comparing against the last real box. */
+      if (parentWidth === 0) {
+        item = parent;
+        continue;
+      }
+
       if (parentWidth > itemWidth + 8) break;
-      item = item.parentElement;
+      item = parent;
+      itemWidth = parentWidth;
     }
 
     return item;
@@ -1314,12 +1449,21 @@
     let inner = null;
 
     for (const level of levels) {
+      /* Clone the decorative divs only. A custom element (the theme
+       * provider) would run its constructor and attach its own shadow root
+       * and styles -- it is a component, not a wrapper -- and a
+       * `display: contents` node contributes no box worth copying. */
+      if (level.tagName.includes('-')) continue;
+      if (getComputedStyle(level).display === 'contents') continue;
+
       const clone = level.cloneNode(false);
       clone.removeAttribute('id');
       if (outer) inner.appendChild(clone);
       else outer = clone;
       inner = clone;
     }
+
+    if (!outer) return button;
 
     outer.classList.add('sdm-toggle-wrap');
     inner.appendChild(button);
@@ -1344,7 +1488,7 @@
     /* Every previous verdict was measured in the other theme. */
     judged.clear();
 
-    if (usesPolarisTheme() && !darkThemeClass && enabled) deriveDarkTokens();
+    if (usesPolarisTheme() && !hasDarkTheme() && enabled) deriveDarkTokens();
 
     if (enabled) contrastGuard();
     else clearGuard();
@@ -1457,12 +1601,13 @@
     }
 
     if (usesPolarisTheme()) {
-      darkThemeClass = detectDarkThemeClass();
+      darkThemeClasses = detectDarkThemeClasses();
+      lastSheetCount = document.styleSheets.length;
       applyRootClasses();
 
       /* No dark token set ships on this page -- derive one from its own
        * light values instead. */
-      if (!darkThemeClass && enabled) deriveDarkTokens();
+      if (!hasDarkTheme() && enabled) deriveDarkTokens();
     } else {
       applyRootClasses();
     }
@@ -1496,7 +1641,7 @@
   /* Shopify's router rewrites <html>'s class on some navigations, which would
    * silently drop dark mode mid-session. */
   new MutationObserver(() => {
-    if (enabled && !root.classList.contains(DARK_CLASS)) applyRootClasses();
+    if (rootClassesDrifted()) applyRootClasses();
   }).observe(root, { attributes: true, attributeFilter: ['class'] });
 
   /* App frames have no synchronous mirror to read, and the admin re-syncs in

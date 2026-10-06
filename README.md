@@ -33,7 +33,7 @@ this page.
 
 | | |
 |---|---|
-| Shopify admin | `admin.shopify.com` |
+| Shopify admin | `admin.shopify.com` — both the classic layout and the newer one (sidebar search, account menu bottom-left) |
 | Partners dashboard | `partners.shopify.com` |
 | Embedded apps | Shopify's own, plus any you add |
 
@@ -78,10 +78,34 @@ Two mechanisms, both Shopify's own:
 
 New admin surfaces get themed for free, as long as they read the tokens.
 
+### The newer admin
+
+Some stores get a redesigned admin — search in the sidebar, no global top
+bar, the bell and account menu at the bottom-left. It themes itself
+differently: `<html>` carries a base class, `p-partial-theme-admin-next`, plus
+a `-light` or `-dark` variant, and Shopify ships the complete dark variant —
+**467 declarations**, every token the base defines.
+
+Dark mode there is not "add the dark class". The `-light` variant has to come
+*off* as well: it re-declares the light tokens at `:root.class` specificity,
+which beats the standalone dark classes, and with both variants present
+whichever Shopify ordered last wins — the light one. So the extension swaps
+the variant, remembers it did, and swaps back on the way out. If Shopify's
+router re-adds `-light` on navigation, the root observer removes it again.
+
+The variant is only applied when its base class is on the page. The same CSS
+bundle defines it on the classic admin too, where forcing a palette built for
+different chrome would be a guess rather than a flip.
+
+This is also what fixed Analytics. Its cards read `--p-color-bg-surface`,
+which the light variant had pinned to white; with the dark variant in place
+the whole page measures clean — zero low-contrast pairs, zero light surfaces.
+
 ### The toggle
 
-Two places, one code path: the button in the admin top bar next to Sidekick,
-and a switch in the extension's toolbar popup. Both just flip one value in
+Two places, one code path: the button in the admin's own chrome — next to
+Sidekick on the classic layout, next to the bell in the bottom-left cluster on
+the newer one — and a switch in the extension's toolbar popup. Both just flip one value in
 `chrome.storage`; every admin tab and embedded app frame listens for that
 change and applies it. The popup needs no page markup at all, so it works
 regardless of what Shopify does to the top bar.
@@ -91,8 +115,12 @@ neighbour's classes at runtime — hashed class names are read, never relied
 on. Shopify's top-bar buttons sit in a stack of wrappers each exactly as wide
 as the button inside, and one redesign of that stack left the toggle clipped
 and pushed Sidekick itself off the bar. So the extension no longer trusts the
-insertion: it **measures** where the toggle landed. If it is not inside the
-bar, or the anchor no longer is, it removes itself and falls back to a
+insertion: it **measures** where the toggle landed. The question it asks is
+layout-independent — did the toggle land *beside its anchor*, on the same
+row and within a few pixels, and did inserting it leave the anchor exactly
+where it was? ("Is it in the top bar" was the first version of that check,
+and the newer admin's bottom-left cluster showed why it was the wrong
+question.) If the answer is no, it removes itself and falls back to a
 fixed-position button that depends on nothing of Shopify's. A future
 redesign can move the toggle to the corner; it cannot remove it.
 
