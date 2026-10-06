@@ -236,10 +236,19 @@
     }
   }
 
+  /* Whether to render the in-page button at all. null until chrome.storage
+   * has answered; the popup switch is always available regardless. */
+  let showButton = null;
+
   function watchPreference() {
     try {
-      chrome.storage.local.get('enabled', (stored) => {
-        if (chrome.runtime.lastError) return;
+      chrome.storage.local.get(['enabled', 'showButton'], (stored) => {
+        if (chrome.runtime.lastError) {
+          showButton = true;
+          return;
+        }
+
+        showButton = stored.showButton !== false;
 
         if (typeof stored.enabled !== 'boolean') {
           /* Nothing stored yet. The admin seeds it from its own localStorage
@@ -255,13 +264,20 @@
       });
 
       chrome.storage.onChanged.addListener((changes, area) => {
-        if (area !== 'local' || !changes.enabled) return;
-        if (changes.enabled.newValue !== enabled) {
+        if (area !== 'local') return;
+
+        if (changes.showButton) {
+          showButton = changes.showButton.newValue !== false;
+          ensureButton();
+        }
+
+        if (changes.enabled && changes.enabled.newValue !== enabled) {
           setEnabled(!!changes.enabled.newValue);
         }
       });
     } catch (e) {
       /* No extension context: the top frame still works off its mirror. */
+      showButton = true;
     }
   }
 
@@ -1209,6 +1225,13 @@
    * class rather than a CSS-module hash, so unlike the admin's
    * `_TopBarButton_v70_1` it does not churn between deploys. */
   const ANCHORS = [
+    /* Newer admin layout: the sidebar's own header row, beside the collapse
+     * control. Next to the logo, and as far from any page action as the
+     * layout allows -- the top-right corner belongs to "Create order" there.
+     * `_CollapseButton_` is a CSS-module name; only its semantic prefix is
+     * matched, and the aria-label is a second route for the same button. */
+    'button[class*="_CollapseButton_"]',
+    'button[aria-label="Collapse navigation"]',
     'button[name="sidekickButton"]',
     'button[aria-controls="sidekick"]',
     'button[aria-label^="Alerts Feed"]',
@@ -1266,16 +1289,25 @@
     button.setAttribute('title', label);
   }
 
+  /* Returns the best visible anchor and its rank in ANCHORS. The rank is
+   * what lets a toggle that had to settle for the bell move back up to the
+   * sidebar header once the sidebar is expanded again. */
   function findAnchor() {
-    for (const selector of ANCHORS) {
+    for (let rank = 0; rank < ANCHORS.length; rank++) {
       /* Shopify keeps a zero-width duplicate of some buttons around; the
        * visible one is the only one worth anchoring to. */
-      for (const el of document.querySelectorAll(selector)) {
-        if (el.parentElement && el.getBoundingClientRect().width > 0) return el;
+      for (const el of document.querySelectorAll(ANCHORS[rank])) {
+        if (el.parentElement && el.getBoundingClientRect().width > 0) {
+          return { el, rank };
+        }
       }
     }
     return null;
   }
+
+  /* The anchor the current button is attached to, if any. */
+  let anchoredTo = null;
+  let anchoredRank = Infinity;
 
   /* --- placement self-check -----------------------------------------------
    *
@@ -1311,23 +1343,70 @@
       rect.right > 0 && rect.left < innerWidth;
   }
 
+  /* Whether the element is actually the thing a click would land on, at
+   * its centre and near each corner. Geometry alone said the toggle was fine
+   * in the collapsed sidebar -- it was on screen and beside its anchor --
+   * while a third of it sat under the page card. Asking the browser what is
+   * at those points is the only measurement that catches that. */
+  function hitTestVisible(el) {
+    const r = el.getBoundingClientRect();
+    if (r.width === 0 || r.height === 0) return false;
+
+    const inset = Math.min(4, r.width / 4, r.height / 4);
+    const points = [
+      [r.left + r.width / 2, r.top + r.height / 2],
+      [r.left + inset, r.top + inset],
+      [r.right - inset, r.top + inset],
+      [r.left + inset, r.bottom - inset],
+      [r.right - inset, r.bottom - inset],
+    ];
+
+    for (const [x, y] of points) {
+      if (x < 0 || y < 0 || x > innerWidth || y > innerHeight) return false;
+      const hit = document.elementFromPoint(x, y);
+      if (!hit || !el.contains(hit)) return false;
+    }
+    return true;
+  }
+
   function placementLooksRight(button, anchor, anchorBefore) {
     const b = button.getBoundingClientRect();
     if (!onScreen(b)) return false;
+    /* Partly off the edge is not placed. In the collapsed sidebar the
+     * toggle landed at x = -2, which "on screen" was happy to accept. */
+    if (b.left < 0 || b.right > innerWidth) return false;
 
-    if (!anchor || !anchor.isConnected) return true;
+    const visible = hitTestVisible(button);
+
+    if (!anchor || !anchor.isConnected) return visible;
     const a = anchor.getBoundingClientRect();
     /* Anchor hidden (collapsed sidebar, responsive layout): nothing to
-     * measure against, and a visible toggle is still the right outcome. */
-    if (a.width === 0) return true;
+     * measure adjacency against; being genuinely visible is the bar. */
+    if (a.width === 0) return visible;
 
     const overlapY = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top);
     if (overlapY < Math.min(a.height, b.height) * 0.5) return false;
 
+    /* Beside the anchor: close, and not on top of it. A negative gap is
+     * the two overlapping, which is how the collapsed sidebar's one 32px
+     * slot ends up holding both. */
     const gap = Math.max(a.left - b.right, b.left - a.right);
-    if (gap > ADJACENT_MAX_GAP) return false;
+    if (gap > ADJACENT_MAX_GAP || gap < -1) return false;
 
-    if (anchorBefore && Math.abs(anchorBefore.top - a.top) > 2) return false;
+    if (anchorBefore) {
+      /* Insertion time. The anchor must still be where it was, and if it
+       * was genuinely visible before we arrived it must still be: in the
+       * collapsed sidebar the third candidate row placed the toggle cleanly
+       * -- by pushing the bell out past the sidebar's edge instead. */
+      if (Math.abs(anchorBefore.top - a.top) > 2) return false;
+      if (anchorBefore.visible && !hitTestVisible(anchor)) return false;
+      return visible;
+    }
+
+    /* Periodic re-check. Covered while the anchor beside us is not: we are
+     * clipped, not behind a modal. A modal covers both, and moving under a
+     * modal would just be churn. */
+    if (!visible && hitTestVisible(anchor)) return false;
 
     return true;
   }
@@ -1336,6 +1415,8 @@
     const existing = document.getElementById(BUTTON_ID);
     if (!existing) return;
     (existing.closest('.sdm-toggle-wrap') || existing).remove();
+    anchoredTo = null;
+    anchoredRank = Infinity;
   }
 
   function placeFloating() {
@@ -1361,41 +1442,112 @@
     document.body.appendChild(button);
   }
 
+  /* Re-anchoring from the floating fallback is retried only when the
+   * anchor's geometry has changed since the last failed attempt, so a
+   * permanently collapsed sidebar does not cost an insert-and-remove every
+   * second for the life of the page. */
+  let lastFailedAnchorSig = '';
+  const FLOAT_RETRY_MS = 10000;
+  let lastFloatRetry = 0;
+
+  function anchorSig(found) {
+    const r = found.el.getBoundingClientRect();
+    return `${found.rank}:${Math.round(r.left)},${Math.round(r.top)},${Math.round(r.width)}`;
+  }
+
+  /* Tries the candidate rows innermost-first and keeps the first placement
+   * that measures right. Returns false when none does. */
+  function insertAnchored(found) {
+    const anchor = found.el;
+    const anchorBefore = {
+      top: anchor.getBoundingClientRect().top,
+      visible: hitTestVisible(anchor),
+    };
+
+    for (const { item, row } of rowCandidates(anchor)) {
+      const button = buildButton(anchor);
+      paintButton(button);
+      button.dataset.sdmPlacement = 'anchor';
+
+      const node = wrapLikeAnchor(anchor, item, button);
+      row.insertBefore(node, item);
+
+      if (placementLooksRight(button, anchor, anchorBefore)) {
+        anchoredTo = anchor;
+        anchoredRank = found.rank;
+        return true;
+      }
+      node.remove();
+    }
+
+    return false;
+  }
+
+  function place() {
+    const found = findAnchor();
+    if (found && insertAnchored(found)) return true;
+
+    if (found) lastFailedAnchorSig = anchorSig(found);
+    anchoredTo = null;
+    anchoredRank = Infinity;
+    placeFloating();
+    return false;
+  }
+
   function ensureButton() {
+    if (!IS_TOP_FRAME) return;
+
+    /* The in-page button is optional: with it off, the popup is the only
+     * switch. null means the preference has not been read yet, and a button
+     * that appears and then vanishes is worse than one that appears a beat
+     * late. */
+    if (showButton !== true) {
+      if (showButton === false) removeButton();
+      return;
+    }
+
     const existing = document.getElementById(BUTTON_ID);
     if (existing && existing.isConnected) {
       paintButton(existing);
 
-      /* A later re-render can move the wrapper we cloned into. Re-measure
-       * occasionally; the floating placement is already self-contained. */
-      if (existing.dataset.sdmPlacement === 'anchor' &&
-          Date.now() - lastPlacementCheck > PLACEMENT_CHECK_MS) {
-        lastPlacementCheck = Date.now();
-        if (!placementLooksRight(existing, findAnchor())) {
+      if (Date.now() - lastPlacementCheck < PLACEMENT_CHECK_MS) return;
+      lastPlacementCheck = Date.now();
+
+      const found = findAnchor();
+
+      if (existing.dataset.sdmPlacement === 'anchor') {
+        /* A later re-render can move or clip the wrapper we cloned into. */
+        if (!placementLooksRight(existing, anchoredTo)) {
           removeButton();
-          placeFloating();
+          place();
+          return;
         }
+        /* Settled for the bell while the sidebar was collapsed; the header
+         * row is back, so go home. */
+        if (found && found.rank < anchoredRank) {
+          removeButton();
+          if (!insertAnchored(found)) place();
+        }
+        return;
+      }
+
+      /* Floating: try to get back to Shopify's chrome when something there
+       * has changed since the last attempt failed -- or, on a slow clock,
+       * in case what blocked it (a modal) went away without moving it. */
+      const changed = found && anchorSig(found) !== lastFailedAnchorSig;
+      const due = Date.now() - lastFloatRetry > FLOAT_RETRY_MS;
+      if (found && (changed || due)) {
+        lastFloatRetry = Date.now();
+        removeButton();
+        place();
       }
       return;
     }
 
-    const anchor = findAnchor();
-    /* No anchor yet: the bar may still be rendering. waitForTopBar falls
-     * back to a floating toggle if it never shows up. */
-    if (!anchor) return;
-
-    const button = buildButton(anchor);
-    paintButton(button);
-    button.dataset.sdmPlacement = 'anchor';
-
-    const anchorBefore = anchor.getBoundingClientRect();
-    const item = rowItemFor(anchor);
-    item.parentElement.insertBefore(wrapLikeAnchor(anchor, item, button), item);
-
-    if (!placementLooksRight(button, anchor, anchorBefore)) {
-      removeButton();
-      placeFloating();
-    }
+    /* No anchor yet: the chrome may still be rendering. waitForTopBar falls
+     * back to a floating toggle if nothing recognisable ever shows up. */
+    if (!findAnchor()) return;
+    place();
   }
 
   /* The admin's top-bar buttons sit inside a stack of decorative wrappers
@@ -1405,29 +1557,49 @@
    * toggle landed below the bar, and it pushed Sidekick itself out of view
    * with it. Climb until the parent is genuinely wider than the item -- that
    * is the row -- and insert there. */
-  function rowItemFor(anchor) {
+  /* Yields (item, row) pairs to try, innermost first, at most a few.
+   *
+   * A row is an ancestor that lays its children out side by side -- a flex
+   * or grid container -- or one that is genuinely wider than what it holds.
+   * The innermost such container is usually right: on the newer layout the
+   * collapse button sits in a one-child flex `_Actions_` cluster inside a
+   * space-between logo row, and inserting into the cluster keeps the toggle
+   * beside the button instead of floating mid-row. When the innermost one
+   * turns out to be a tight decorative wrapper that wraps the anchor onto a
+   * second line, the measurement rejects it and the next candidate out is
+   * tried. */
+  const MAX_ROW_CANDIDATES = 3;
+
+  function* rowCandidates(anchor) {
     let item = anchor;
     let itemWidth = anchor.getBoundingClientRect().width;
+    let yielded = 0;
 
-    while (item.parentElement) {
+    while (item.parentElement && yielded < MAX_ROW_CANDIDATES) {
       const parent = item.parentElement;
+      if (parent === document.body) break;
       const parentWidth = parent.getBoundingClientRect().width;
 
       /* The newer admin wraps each button in an <s-internal-theme-provider>
        * with `display: contents` -- no box of its own, so its width reads as
-       * zero and would otherwise look like the end of the stack. Climb
-       * through it and keep comparing against the last real box. */
+       * zero. Climb through it and keep comparing against the last real box. */
       if (parentWidth === 0) {
         item = parent;
         continue;
       }
 
-      if (parentWidth > itemWidth + 8) break;
+      const style = getComputedStyle(parent);
+      const laysOutInRow = /flex|grid/.test(style.display) &&
+        !style.flexDirection.startsWith('column');
+
+      if (laysOutInRow || parentWidth > itemWidth + 8) {
+        yield { item, row: parent };
+        yielded++;
+      }
+
       item = parent;
       itemWidth = parentWidth;
     }
-
-    return item;
   }
 
   /* Rebuild the anchor's wrapper stack around our button, so it gets the
@@ -1581,11 +1753,16 @@
         return;
       }
 
+      if (showButton === false) {
+        clearInterval(timer);
+        return;
+      }
+
       if (Date.now() - started > TOP_BAR_TIMEOUT_MS) {
         clearInterval(timer);
         /* Nothing we recognise ever rendered. A toggle that is merely in
          * the corner beats one that does not exist. */
-        placeFloating();
+        if (showButton !== false) placeFloating();
         return;
       }
 

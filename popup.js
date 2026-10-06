@@ -8,19 +8,26 @@ document.getElementById('version').textContent =
  * if the in-page button had been clicked -- so there is one code path for
  * turning the theme on and off, not two that can drift. */
 const toggle = document.getElementById('toggle');
+const showButton = document.getElementById('showButton');
 
-chrome.storage.local.get('enabled', (stored) => {
+chrome.storage.local.get(['enabled', 'showButton'], (stored) => {
   toggle.checked = Boolean(stored.enabled);
+  /* Absent means never set, and the in-page toggle is on by default. */
+  showButton.checked = stored.showButton !== false;
 });
 
 toggle.addEventListener('change', () => {
   chrome.storage.local.set({ enabled: toggle.checked });
 });
 
-/* Keep the switch honest if the in-page button is clicked while the popup
- * is open. */
+showButton.addEventListener('change', () => {
+  chrome.storage.local.set({ showButton: showButton.checked });
+});
+
+/* Keep the switches honest if the in-page button is clicked while the
+ * popup is open. */
 chrome.storage.onChanged.addListener((changes, area) => {
-  if (area === 'local' && changes.enabled) {
-    toggle.checked = Boolean(changes.enabled.newValue);
-  }
+  if (area !== 'local') return;
+  if (changes.enabled) toggle.checked = Boolean(changes.enabled.newValue);
+  if (changes.showButton) showButton.checked = changes.showButton.newValue !== false;
 });

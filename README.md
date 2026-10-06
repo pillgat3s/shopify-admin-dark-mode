@@ -104,8 +104,10 @@ the whole page measures clean — zero low-contrast pairs, zero light surfaces.
 ### The toggle
 
 Two places, one code path: the button in the admin's own chrome — next to
-Sidekick on the classic layout, next to the bell in the bottom-left cluster on
-the newer one — and a switch in the extension's toolbar popup. Both just flip one value in
+Sidekick on the classic layout, in the sidebar header beside the collapse
+control on the newer one — and a switch in the extension's toolbar popup.
+The popup also has **Show toggle in Shopify**; turn it off and the popup is
+the only switch, with nothing injected into the page. Both just flip one value in
 `chrome.storage`; every admin tab and embedded app frame listens for that
 change and applies it. The popup needs no page markup at all, so it works
 regardless of what Shopify does to the top bar.
@@ -120,9 +122,16 @@ layout-independent — did the toggle land *beside its anchor*, on the same
 row and within a few pixels, and did inserting it leave the anchor exactly
 where it was? ("Is it in the top bar" was the first version of that check,
 and the newer admin's bottom-left cluster showed why it was the wrong
-question.) If the answer is no, it removes itself and falls back to a
-fixed-position button that depends on nothing of Shopify's. A future
-redesign can move the toggle to the corner; it cannot remove it.
+question.) Candidate rows are tried innermost-first and the first that measures
+right is kept. "Measures right" includes a hit test: geometry alone said the
+toggle was fine in the collapsed sidebar while a third of it sat under the
+page card, and a third candidate row placed it cleanly by pushing the bell
+itself out past the sidebar's edge. So both the toggle and its anchor must
+still be what a click would land on. If nothing measures right, it falls
+back to a fixed-position button that depends on nothing of Shopify's — and
+keeps trying to get back: collapse the sidebar and the toggle floats,
+expand it and the toggle returns to the header. A future redesign can move
+the toggle to the corner; it cannot remove it.
 
 ### The contrast guard
 

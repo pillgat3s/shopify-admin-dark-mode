@@ -109,6 +109,10 @@ h1 {
   background: #2f2f2f;
 }
 
+.repo + .repo {
+  margin-top: 8px;
+}
+
 .repo:focus-visible {
   outline: 2px solid #97adff;
   outline-offset: 2px;
