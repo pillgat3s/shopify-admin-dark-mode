@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Shopify Admin Dark Mode",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "description": "Adds a dark mode toggle to the Shopify admin and Partners dashboard.",
   "homepage_url": "https://github.com/pillgat3s/shopify-admin-dark-mode",
   "icons": {
@@ -27,7 +27,12 @@
     "https://admin.shopify.com/*",
     "https://partners.shopify.com/*",
     "https://*.shopifyapps.com/*",
-    "https://loox.io/*"
+    "https://loox.io/*",
+    "https://dhlshipping.app/*",
+    "https://app.pop-convert.com/*",
+    "https://channel-app.google/*",
+    "https://www.commercepartnerhub.com/*",
+    "https://server.shop.app/*"
   ],
   "content_scripts": [
     {
@@ -48,7 +53,12 @@
       "//": "Embedded apps. Each app iframe is the developer's own origin, so every app needs its own entry here and in host_permissions -- see 'Theming your own apps' in the README. content.js no-ops unless it is a frame inside admin.shopify.com.",
       "matches": [
         "https://*.shopifyapps.com/*",
-        "https://loox.io/*"
+        "https://loox.io/*",
+        "https://dhlshipping.app/*",
+        "https://app.pop-convert.com/*",
+        "https://channel-app.google/*",
+        "https://www.commercepartnerhub.com/*",
+        "https://server.shop.app/*"
       ],
       "js": [
         "content.js"

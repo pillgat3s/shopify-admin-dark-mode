@@ -9,7 +9,7 @@ set -euo pipefail
 staged=$(git diff --cached --name-only)
 echo "$staged" | grep -q '^manifest.json$' || exit 0
 
-leaks=$(git show :manifest.json | grep -nE 'railway\.app|workers\.dev|ngrok|trycloudflare' || true)
+leaks=$(git show :manifest.json | grep -nE 'railway\.app|workers\.dev|tws\.sh|mergify\.app|dev-reload|ngrok|trycloudflare' || true)
 [ -z "$leaks" ] && exit 0
 
 cat >&2 <<MSG

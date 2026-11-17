@@ -9,3 +9,4 @@ local-apps.sh
 store-listing.md
 store-screenshots/
 make-screenshots.sh
+dev-reload.js

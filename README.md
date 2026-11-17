@@ -104,8 +104,9 @@ the whole page measures clean — zero low-contrast pairs, zero light surfaces.
 ### The toggle
 
 Two places, one code path: the button in the admin's own chrome — next to
-Sidekick on the classic layout, in the sidebar header beside the collapse
-control on the newer one — and a switch in the extension's toolbar popup.
+Sidekick on the classic layout, beside the bell in the bottom-left account
+cluster on the newer one, and in the theme editor's own top bar next to its
+Sidekick button — and a switch in the extension's toolbar popup.
 The popup also has **Show toggle in Shopify**; turn it off and the popup is
 the only switch, with nothing injected into the page. Both just flip one value in
 `chrome.storage`; every admin tab and embedded app frame listens for that
@@ -209,11 +210,46 @@ whether or not they're broken. Two things keep that from wrecking the app:
 Expect repainted apps to look good but not native. Polaris apps should look
 native.
 
+### Four ways an app frame re-lightens itself
+
+Flipping the palette on the app's `<html>` is the easy part. Going through
+every app installed on a real store turned up four ways the light theme
+comes back anyway, each fixed by measuring rather than by app:
+
+- **The app replaces `<html>`.** Some React/Remix apps swap the whole root
+  element while they boot. Classes set at `document_start` land on a
+  detached node; the live page stays white while the extension's own state
+  says dark. The root is re-read whenever the document's children change.
+- **Polaris' `AppProvider` strips the dark class.** On every root render it
+  removes all `p-theme-*` classes but the one it chose. The root observer
+  treats a missing dark class as drift and puts it back.
+- **A nested theme container re-declares the light tokens** — sometimes
+  from a cross-origin stylesheet that can't be read, sometimes inline.
+  Messaging's cards went white with light text this way. Any container
+  whose surface token resolves differently from the root's gets the root's
+  token set inline, restored on the way out.
+- **App Home web components read suffixed tokens.** `<s-button>` and
+  `<s-banner>` (Inbox) read `--p-color-bg-fill-656e1` — the token name plus
+  a per-release suffix, with a hardcoded light fallback — and nothing in the
+  app frame defines them. The admin publishes its resolved dark palette to
+  `chrome.storage`; the app frame reads the suffix out of the components'
+  own stylesheets and declares the palette under it. A new Polaris release
+  brings a new suffix along by itself.
+
+The contrast guard got three lessons from the same sweep: a text class is
+judged *in context* (its classed ancestors), since `.Polaris-Text--root` on
+a dark card and inside a repainted banner need different answers; light
+ink on a light surface is a stale surface even above the "invisible" floor;
+and only elements that carry text are judged at all — a switch thumb
+measured against its own white "on" track had the track repainted away.
+
 ### Theming your own apps
 
 Covered out of the box: `*.shopifyapps.com` (Shopify's own — Inbox,
-Messaging, Search & Discovery, Translate & Adapt, Flow, Shop, POS, Google,
-Facebook) and `loox.io`.
+Messaging, Search & Discovery, Translate & Adapt, Flow, Subscriptions, POS,
+Facebook & Instagram), `server.shop.app` (Shop), `channel-app.google`
+(Google & YouTube), `www.commercepartnerhub.com`, `loox.io`,
+`app.pop-convert.com` and `dhlshipping.app` (Post & DHL Shipping).
 
 Every other app serves from its own domain and has to be added by hand. Open
 the app in your admin, and in the DevTools console run:

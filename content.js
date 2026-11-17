@@ -127,7 +127,12 @@
    * and leaves Shopify's natively-dark ones (the top bar) alone. */
   const TOUCHED = 'sdmWasLight';
 
-  const root = document.documentElement;
+  /* Not a constant. Some embedded apps replace the whole <html> element
+   * while they boot. A reference captured at document_start
+   * then points at a detached node: every class we toggled went onto that
+   * ghost, the live page stayed light, and the extension's own reports
+   * insisted it was dark. syncRoot() re-reads it wherever it matters. */
+  let root = document.documentElement;
 
   /* --- frame role --------------------------------------------------------
    *
@@ -150,9 +155,18 @@
    * The gate matters for more than tidiness: the manifest has to list each
    * app's own domain to reach its iframe, and this makes sure that access is
    * never used on those domains outside the admin. Open loox.io directly in
-   * a tab and this script does nothing at all. */
-  const IS_TOP_FRAME = window === window.top;
+   * a tab and this script does nothing at all.
+   *
+   * That claim used to be false. "Top frame" meant any top-level page the
+   * manifest matched, so visiting an app's domain directly ran the full admin
+   * path there -- theme classes, contrast guard, and after fifteen seconds a
+   * floating toggle on someone else's site. Top-frame mode is now limited to
+   * Shopify's own surfaces, and app-frame mode requires actually being a
+   * frame (a referrer from the admin is not enough on its own). */
   const ADMIN_ORIGIN = 'https://admin.shopify.com';
+  const TOP_FRAME_ORIGINS = [ADMIN_ORIGIN, 'https://partners.shopify.com'];
+  const IN_FRAME = window !== window.top;
+  const IS_TOP_FRAME = !IN_FRAME && TOP_FRAME_ORIGINS.includes(location.origin);
 
   function embeddedInAdmin() {
     try {
@@ -167,7 +181,7 @@
     return document.referrer.startsWith(ADMIN_ORIGIN + '/');
   }
 
-  const IS_APP_FRAME = !IS_TOP_FRAME && embeddedInAdmin();
+  const IS_APP_FRAME = IN_FRAME && embeddedInAdmin();
   if (!IS_TOP_FRAME && !IS_APP_FRAME) return;
 
   /* Whether this app frame turns out to be a Polaris app. Unknowable at
@@ -175,13 +189,43 @@
    * the document is ready and the theming path is chosen then. */
   let isPolarisFrame = false;
 
+  /* A Polaris theme class on <html> is the cheapest and earliest signal --
+   * Shopify's frames set it before their tokens resolve. */
+  const POLARIS_ROOT_CLASS = /(^|\s)p-(partial-)?theme-/;
+
   function detectPolaris() {
+    if (POLARIS_ROOT_CLASS.test(root.className)) return true;
     const tokens = getComputedStyle(root);
     return !!(
       tokens.getPropertyValue('--p-color-bg').trim() ||
       tokens.getPropertyValue('--p-color-bg-surface').trim() ||
       document.querySelector(PROVIDER)
     );
+  }
+
+  /* The theme editor frame gets its theme class and stylesheets *after*
+   * DOMContentLoaded. Detection used to run once, at start, see nothing, and
+   * commit the frame to the generic repaint for good -- 100 hand-written
+   * element rules fighting a page that ships Shopify's full dark palette.
+   * So an app frame keeps asking until it is Polaris, and the moment it is,
+   * the repaint is torn down and the real palette takes over. */
+  function maybeBecomePolaris() {
+    if (!IS_APP_FRAME || isPolarisFrame || !detectPolaris()) return false;
+
+    isPolarisFrame = true;
+    darkThemeClasses = detectDarkThemeClasses();
+    lastSheetCount = document.styleSheets.length;
+
+    clearGuard();
+    applyRootClasses();
+    if (usesPolarisTheme()) {
+      applyNestedLightScopes();
+      applyInlineTokenScopes();
+      applyProviders(deepQuery(PROVIDER));
+    }
+    if (enabled && !hasDarkTheme()) deriveDarkTokens();
+    if (enabled) scheduleGuard();
+    return true;
   }
 
   /* Whether Shopify's own token classes and theme providers apply here. */
@@ -242,10 +286,15 @@
 
   function watchPreference() {
     try {
-      chrome.storage.local.get(['enabled', 'showButton'], (stored) => {
+      chrome.storage.local.get(['enabled', 'showButton', 'darkTokens'], (stored) => {
         if (chrome.runtime.lastError) {
           showButton = true;
           return;
+        }
+
+        if (stored.darkTokens) {
+          darkTokens = stored.darkTokens;
+          applySuffixedTokens();
         }
 
         showButton = stored.showButton !== false;
@@ -265,6 +314,11 @@
 
       chrome.storage.onChanged.addListener((changes, area) => {
         if (area !== 'local') return;
+
+        if (changes.darkTokens && IS_APP_FRAME) {
+          darkTokens = changes.darkTokens.newValue || null;
+          applySuffixedTokens();
+        }
 
         if (changes.showButton) {
           showButton = changes.showButton.newValue !== false;
@@ -329,6 +383,14 @@
   function rootClassesDrifted() {
     if (!enabled) return false;
     if (!root.classList.contains(DARK_CLASS)) return true;
+    /* Polaris' React AppProvider strips every `p-theme-*` class but the one
+     * it chose whenever it re-renders the root -- taking our dark class with
+     * it while leaving `sdm-dark` alone. One app went white that
+     * way: <html> said dark, the palette said light. */
+    if (usesPolarisTheme() && hasDarkTheme() &&
+        darkThemeClasses.some((cls) => !root.classList.contains(cls))) {
+      return true;
+    }
     for (const v of activeVariants()) {
       if (!root.classList.contains(v.dark)) return true;
       if (root.classList.contains(v.light)) return true;
@@ -339,12 +401,78 @@
   /* Theme providers emit nested `.p-theme-light` containers, and that class
    * re-declares the *full* light token set -- so any such subtree would
    * re-lighten itself from the inside. */
+  /* Nested containers that re-assert a light variant. Swapping the variant on
+   * <html> is not enough when a panel inside carries its own
+   * `p-partial-theme-admin-next-light`: everything under it resolves the
+   * light tokens again, and a fix written as `var(--p-color-text-secondary)`
+   * there just rewrites a label to the same dim grey it already had. */
+  const nestedSwapped = new WeakSet();
+
   function applyNestedLightScopes() {
     for (const element of document.querySelectorAll('.p-theme-light')) {
       if (element === root) continue;
       POLARIS_DARK_CLASSES.forEach((cls) =>
         element.classList.toggle(cls, enabled)
       );
+    }
+
+    for (const v of THEME_VARIANTS) {
+      const selector = enabled ? '.' + v.light : '.' + v.dark;
+      for (const element of document.querySelectorAll(selector)) {
+        if (element === root) continue;
+        if (enabled) {
+          element.classList.remove(v.light);
+          element.classList.add(v.dark);
+          nestedSwapped.add(element);
+        } else if (nestedSwapped.has(element)) {
+          element.classList.remove(v.dark);
+          element.classList.add(v.light);
+          nestedSwapped.delete(element);
+        }
+      }
+    }
+  }
+
+  /* Nested Polaris theme containers that re-declare the light palette from a
+   * place nothing else can reach. Messaging's `.Polaris-ThemeProvider--
+   * themeContainer` gets its tokens from a cross-origin stylesheet (rules
+   * unreadable, no class to swap), older providers write them as an inline
+   * style -- either way the subtree re-lightens under a dark <html> and
+   * paints white cards with the dark palette's light text. So measure
+   * instead of matching: any such container whose surface token resolves
+   * differently from the root's gets the root's whole token set inline.
+   * Inline beats every stylesheet; the previous inline values are kept and
+   * restored on the way out. */
+  const TOKEN_SCOPES = '[class*="ThemeProvider"], [style*="--p-"]';
+  const inlineTokens = new Map();
+
+  function applyInlineTokenScopes() {
+    if (enabled) {
+      let rootStyle = null;
+      let names = null;
+      for (const element of document.querySelectorAll(TOKEN_SCOPES)) {
+        if (element === root) continue;
+        rootStyle = rootStyle || getComputedStyle(root);
+        const want = rootStyle.getPropertyValue('--p-color-bg-surface').trim();
+        if (!want) return;
+        const have = getComputedStyle(element).getPropertyValue('--p-color-bg-surface').trim();
+        if (have === want) continue;
+        names = names || Array.from(rootStyle).filter((n) => n.startsWith('--p-color'));
+        const saved = inlineTokens.get(element) || {};
+        for (const name of names) {
+          if (!(name in saved)) saved[name] = element.style.getPropertyValue(name);
+          element.style.setProperty(name, rootStyle.getPropertyValue(name).trim());
+        }
+        inlineTokens.set(element, saved);
+      }
+    } else {
+      for (const [element, saved] of inlineTokens) {
+        for (const name in saved) {
+          if (saved[name]) element.style.setProperty(name, saved[name]);
+          else element.style.removeProperty(name);
+        }
+      }
+      inlineTokens.clear();
     }
   }
 
@@ -362,6 +490,91 @@
         delete provider.dataset[TOUCHED];
       }
     }
+  }
+
+  /* --- suffixed tokens (Polaris web components in app frames) ------------
+   *
+   * Apps built on Shopify's App Home web components (`<s-button>`,
+   * `<s-banner>` -- Inbox is one) don't read `--p-color-bg-fill`. They read
+   * `--p-color-bg-fill-656e1`: the token name plus a per-release suffix, with
+   * a hardcoded light fallback, and nothing in the app frame ever defines
+   * them. So they render the fallback -- white buttons, white banners -- and
+   * the guard's text fix then makes their labels white-on-white.
+   *
+   * There is no dark palette in such a frame to flip. The admin has one,
+   * though, and it is the right one by definition. So the top frame
+   * publishes its resolved dark `--p-color-*` values to storage, and an app
+   * frame declares each of them under every suffix its components ask for.
+   * The suffix is read from the components' own stylesheets, never
+   * hardcoded, so a new Polaris release just brings a new suffix along. */
+  let darkTokens = null;
+  let publishedTokens = '';
+  const tokenSuffixes = new Set();
+  const scannedSheets = new WeakSet();
+  let suffixStyle = null;
+  const SUFFIXED = /--p-[a-z0-9-]+?-([0-9a-f]{5})(?=[\s,);:])/g;
+
+  function publishDarkTokens() {
+    if (!IS_TOP_FRAME || !enabled || !hasDarkTheme()) return;
+    const style = getComputedStyle(root);
+    const tokens = {};
+    for (const name of Array.from(style)) {
+      if (name.startsWith('--p-color')) tokens[name] = style.getPropertyValue(name).trim();
+    }
+    const serial = JSON.stringify(tokens);
+    if (serial === publishedTokens || Object.keys(tokens).length < 50) return;
+    publishedTokens = serial;
+    try {
+      chrome.storage.local.set({ darkTokens: tokens });
+    } catch (e) {
+      /* Extension context torn down. */
+    }
+  }
+
+  function scanTokenSuffixes(scope) {
+    if (!IS_APP_FRAME || !scope.adoptedStyleSheets) return;
+    const sheets = [...scope.adoptedStyleSheets];
+    for (const el of scope.querySelectorAll('style')) if (el.sheet) sheets.push(el.sheet);
+    let grew = false;
+    for (const sheet of sheets) {
+      if (scannedSheets.has(sheet)) continue;
+      scannedSheets.add(sheet);
+      let text = '';
+      try {
+        for (const rule of sheet.cssRules) {
+          text += rule.cssText;
+          if (text.length > 4000) break;
+        }
+      } catch (e) {
+        continue;
+      }
+      for (const match of text.matchAll(SUFFIXED)) {
+        if (!tokenSuffixes.has(match[1])) {
+          tokenSuffixes.add(match[1]);
+          grew = true;
+        }
+      }
+    }
+    if (grew) applySuffixedTokens();
+  }
+
+  function applySuffixedTokens() {
+    if (!IS_APP_FRAME) return;
+    const want = enabled && darkTokens && tokenSuffixes.size;
+    if (!want) {
+      if (suffixStyle) suffixStyle.textContent = '';
+      return;
+    }
+    if (!suffixStyle || !suffixStyle.isConnected) {
+      suffixStyle = suffixStyle || document.createElement('style');
+      suffixStyle.id = 'sdm-suffixed-tokens';
+      (document.head || root).appendChild(suffixStyle);
+    }
+    let css = '';
+    for (const suffix of tokenSuffixes) {
+      for (const name in darkTokens) css += name + '-' + suffix + ':' + darkTokens[name] + ' !important;';
+    }
+    suffixStyle.textContent = ':root{' + css + '}';
   }
 
   /* --- shadow DOM traversal ---------------------------------------------- */
@@ -478,6 +691,12 @@
    * floor for body text is 4.5; staying near 1 means we only ever touch
    * genuinely buried content and never second-guess Shopify's design. */
   const CONTRAST_FLOOR = 1.6;
+
+  /* WCAG's minimum for large text. See the dark-on-dark branch below. */
+  const DIM_INK_FLOOR = 3;
+
+  /* Classed ancestors that make up a selector's judging context. */
+  const CONTEXT_DEPTH = 3;
 
   /* One pass is capped so a 500-row order list can never cause a long frame.
    * Anything skipped is picked up on the next pass. */
@@ -611,10 +830,15 @@
     ).join(' ');
   }
 
+  /* `:not(#sdm-none)` matches always and counts as an ID. A fix is already
+   * `!important`, but so are some apps' own rules -- Pop Convert paints its
+   * menu items with `.has-subitems .menu-item[data-v-…] { … !important }`,
+   * three classes against our two -- and between two important declarations
+   * specificity decides. One ID outranks any stack of classes. */
   function flushRules(scopeKey) {
     if (scopeKey === null) {
       const text = Array.from(documentRules, ([selector, declarations]) =>
-        `html.${DARK_CLASS} ${selector} { ${serialize(declarations)} }`
+        `html.${DARK_CLASS}:not(#sdm-none) ${selector} { ${serialize(declarations)} }`
       ).join('\n');
 
       documentStyleElement().textContent = text;
@@ -1027,6 +1251,7 @@
    * browser recalculates style but never paints the intermediate light
    * state. */
   let lastSheetCount = 0;
+  let guardSheetCount = 0;
 
   function refreshDerivedTokens() {
     if (!enabled || !usesPolarisTheme()) return;
@@ -1060,20 +1285,47 @@
   }
 
   function contrastGuard() {
+    syncRoot();
     if (!enabled) return;
+
+    maybeBecomePolaris();
 
     refreshDerivedTokens();
 
     let scanned = 0;
+    let outOfBudget = false;
     const dirtyScopes = new Set();
+
+    publishDarkTokens();
+
+    /* A stylesheet that arrives after an element was judged changes what it
+     * looks like, but not the seen-set: Pop Convert's Vue chunk paints its
+     * menu items white after the first pass had already measured them
+     * transparent and moved on. New sheets void the old verdicts. */
+    const sheetCount = document.styleSheets.length;
+    if (sheetCount !== guardSheetCount) {
+      guardSheetCount = sheetCount;
+      judged.clear();
+    }
 
     walkRoots((currentRoot) => {
       const scopeKey = scopeKeyFor(currentRoot);
+      scanTokenSuffixes(currentRoot);
 
       /* This is the only pass that reaches inside shadow roots, so it is also
        * where providers nested in one get flipped. */
       if (scopeKey !== null) {
         applyProviders(currentRoot.querySelectorAll(PROVIDER));
+      }
+
+      /* Rules are stored once per component type and shared by every
+       * instance, but the seen-set means only the first instance of a type is
+       * ever inspected -- so only that one got the sheet attached. On a page
+       * of Polaris web components that read as half the cards dark and their
+       * identical siblings still white. Attach the shared sheet to every
+       * instance as the walk passes it. */
+      if (scopeKey !== null && shadowSheets.has(scopeKey)) {
+        sheetFor(scopeKey, currentRoot);
       }
 
       const seen = judgedSet(scopeKey);
@@ -1086,7 +1338,10 @@
       };
 
       for (const element of currentRoot.querySelectorAll('*')) {
-        if (scanned >= SCAN_BUDGET) return;
+        if (scanned >= SCAN_BUDGET) {
+          outOfBudget = true;
+          return;
+        }
 
         const isCanvas = element.tagName === 'CANVAS';
         const carriesText = hasOwnText(element);
@@ -1103,15 +1358,36 @@
         if (!target) continue;
 
         const selector = selectorFor(target);
-        if (seen.has(selector)) continue;
 
-        seen.add(selector);
+        /* Judged per selector *in context*. Keyed on the selector alone,
+         * `.Polaris-Text--root` was measured once -- on a card where it was
+         * fine -- and every later instance was skipped, including the ones
+         * inside a repainted banner whose own text colour stayed light-mode
+         * dark: 1.07, invisible, never looked at. The classed ancestors
+         * are cheap context that tell those instances apart. */
+        let context = '';
+        let contextNode = target;
+        for (let depth = 0; depth < CONTEXT_DEPTH; depth++) {
+          contextNode = contextNode.parentElement
+            ? styleTargetFor(contextNode.parentElement)
+            : null;
+          if (!contextNode) break;
+          context = selectorFor(contextNode) + ' ' + context;
+        }
+        /* An unclassed child shares its ancestor's selector, but not its
+         * colour: the classed stack is judged first, measures fine, and its
+         * bare `<p>` with a hardcoded ink would be skipped as already seen. */
+        const seenKey = context + selector +
+          (element === target ? '' : ' ' + element.tagName.toLowerCase());
+        if (seen.has(seenKey)) continue;
+
+        seen.add(seenKey);
         scanned++;
 
         const style = getComputedStyle(element);
         if (style.visibility === 'hidden' || style.display === 'none') {
           /* Not measurable yet -- let a later pass judge it. */
-          seen.delete(selector);
+          seen.delete(seenKey);
           continue;
         }
 
@@ -1127,7 +1403,7 @@
           } else if (lightness === null) {
             /* Too small to judge, and unreadable -- it may simply not have
              * been drawn yet, so do not cache the verdict. */
-            seen.delete(selector);
+            seen.delete(seenKey);
           }
           continue;
         }
@@ -1153,24 +1429,65 @@
            * surfaces, anything painted by the app after this pass. */
         }
 
+        /* Contrast is a property of text. A switch thumb inherits the page's
+         * light ink, measures it against the white "on" track it sits in,
+         * and without this the guard "fixed" the track to the page colour --
+         * every enabled switch in the theme editor became an invisible
+         * slot with a grey dot in it. */
+        if (!carriesText) continue;
+
         const foreground = parseColor(style.color);
         if (!foreground || foreground.a < 0.5) continue;
 
         const background = effectiveBackground(element);
         if (!background) continue;
 
-        if (contrastRatio(foreground, background.color) >= CONTRAST_FLOOR) {
+        const ratio = contrastRatio(foreground, background.color);
+        const lightSurface = relativeLuminance(background.color) > 0.5;
+
+        /* Dark ink on a dark surface gets a stricter floor than the general
+         * "invisible" one. The theme editor's setting labels are a light-mode
+         * #4d4d4d that never flipped: 2.06 against #1a1a1a, legible only if
+         * you already know what they say. Below WCAG's large-text minimum,
+         * dark-on-dark ink is a stale light-mode colour, not a design choice. */
+        /* Light ink on a light surface is the mirror case: the ink went
+         * dark-mode, the surface never did. A Polaris table heading at #f7f7f7
+         * under #b5b5b5 labels measures 1.91 -- above "invisible", still
+         * washed out, and plainly a surface that missed the flip. */
+        const lightInk = relativeLuminance(foreground) > 0.35;
+        const floor = lightSurface && !lightInk ? CONTRAST_FLOOR : DIM_INK_FLOOR;
+        if (ratio >= floor) continue;
+
+        /* ...except where the dimness is the message: a disabled control
+         * ("Add block (3/3)" at the block limit) is meant to read as off. */
+        if (!lightSurface && ratio >= CONTRAST_FLOOR &&
+            element.closest('[disabled], [aria-disabled="true"]')) {
           continue;
         }
 
+        /* Ink fixes are scoped to the surface they were measured on: the
+         * same text class can sit on a dark card and on a light brand pill,
+         * and each needs the opposite fix. */
+        const surfaceOwner = background.owner && styleTargetFor(background.owner);
+        /* An unclassed element retargets to a classed ancestor, and colour
+         * inherits -- unless the element sets its own, as the POS preview's
+         * bare `<p>`s do. Naming the tag reaches it without a class. */
+        const ownInk = element === target
+          ? selector
+          : selector + ' ' + element.tagName.toLowerCase();
+        const inkSelector = surfaceOwner && surfaceOwner !== target &&
+          surfaceOwner.getRootNode() === target.getRootNode()
+          ? selectorFor(surfaceOwner) + ' ' + ownInk
+          : ownInk;
+
         /* The pair is unreadable. Which half is stale? */
-        if (relativeLuminance(background.color) > 0.5) {
+        if (lightSurface) {
           if (chroma(background.color) > NEUTRAL_CHROMA) {
             /* A light *brand* surface -- a Draft badge, a status pill. The
              * colour is the point, so it stays and the ink moves instead.
              * Darkening the badge would make it readable by destroying the
              * thing it was communicating. */
-            write(scopeKey, currentRoot, selector, 'color', 'rgb(26, 26, 26)');
+            write(scopeKey, currentRoot, inkSelector, 'color', 'rgb(26, 26, 26)');
             continue;
           }
 
@@ -1183,12 +1500,28 @@
           write(scopeKeyFor(ownerRoot), ownerRoot, selectorFor(owner),
             'background-color', SURFACE);
         } else {
-          /* Dark on dark: the text colour is the stale half. */
-          write(scopeKey, currentRoot, selector,
-            'color', 'var(--p-color-text, #eee)');
+          /* Dark on dark: the text colour is the stale half. Genuinely
+           * invisible text becomes primary ink; merely dim text becomes
+           * secondary, so a label still reads as a label next to its value. */
+          /* Literal values, deliberately: inside a scope that still resolves
+           * light tokens, `var(--p-color-text-secondary)` *is* the dim grey
+           * being fixed, and the rule would change nothing. These are the
+           * dark palette's own primary and secondary ink. */
+          /* On a coloured fill -- a green primary button -- the ink is
+           * white in every Polaris palette; grey there reads as disabled. */
+          const ink = chroma(background.color) > NEUTRAL_CHROMA ? '#ffffff'
+            : ratio < CONTRAST_FLOOR ? '#eeeeee' : '#aaaaaa';
+          write(scopeKey, currentRoot, inkSelector, 'color', ink);
         }
       }
     });
+
+    /* A large page -- the theme editor's section tree is one -- can hold
+     * more distinct class signatures than one pass judges. Passes used to
+     * re-run only on mutations, so once the page went quiet everything past
+     * the budget was never looked at: the untouched part of the editor
+     * sidebar stayed light text on white. Keep going until a pass finishes. */
+    if (outOfBudget) scheduleGuard();
 
     if (!dirtyScopes.size) return;
 
@@ -1212,6 +1545,7 @@
 
     if (documentStyle) documentStyle.textContent = '';
     shadowSheets.forEach((sheet) => sheet.replaceSync(''));
+    applySuffixedTokens();
   }
 
   /* --- toggle button ----------------------------------------------------- */
@@ -1225,16 +1559,17 @@
    * class rather than a CSS-module hash, so unlike the admin's
    * `_TopBarButton_v70_1` it does not churn between deploys. */
   const ANCHORS = [
-    /* Newer admin layout: the sidebar's own header row, beside the collapse
-     * control. Next to the logo, and as far from any page action as the
-     * layout allows -- the top-right corner belongs to "Create order" there.
-     * `_CollapseButton_` is a CSS-module name; only its semantic prefix is
-     * matched, and the aria-label is a second route for the same button. */
-    'button[class*="_CollapseButton_"]',
-    'button[aria-label="Collapse navigation"]',
+    /* Classic layout: next to Sidekick. On the newer layout Sidekick is
+     * rendered zero-width, so these fall through. */
     'button[name="sidekickButton"]',
     'button[aria-controls="sidekick"]',
+    /* Newer layout: beside the bell in the bottom-left account cluster. */
     'button[aria-label^="Alerts Feed"]',
+    /* Fallback on the newer layout: the sidebar header, beside the collapse
+     * control. `_CollapseButton_` is a CSS-module name; only its semantic
+     * prefix is matched, and the aria-label is a second route. */
+    'button[class*="_CollapseButton_"]',
+    'button[aria-label="Collapse navigation"]',
     '.Polaris-TopBar-Menu__Activator',
     /* Partners' older pages (settings, themes) are not Polaris at all -- they
      * run Shopify's legacy `ui-*` system with its own top bar. Anchor on the
@@ -1292,11 +1627,21 @@
   /* Returns the best visible anchor and its rank in ANCHORS. The rank is
    * what lets a toggle that had to settle for the bell move back up to the
    * sidebar header once the sidebar is expanded again. */
+  /* Inside an app frame only a Sidekick button counts. That is what marks
+   * the theme editor's own top bar; the admin-chrome anchors above would be
+   * a stranger's markup in any other embedded app. */
+  const APP_FRAME_ANCHORS = [
+    'button[name="sidekickButton"]',
+    'button[aria-controls="sidekick"]',
+    'button[aria-label="Sidekick"]',
+  ];
+
   function findAnchor() {
-    for (let rank = 0; rank < ANCHORS.length; rank++) {
+    const list = IS_APP_FRAME ? APP_FRAME_ANCHORS : ANCHORS;
+    for (let rank = 0; rank < list.length; rank++) {
       /* Shopify keeps a zero-width duplicate of some buttons around; the
        * visible one is the only one worth anchoring to. */
-      for (const el of document.querySelectorAll(ANCHORS[rank])) {
+      for (const el of document.querySelectorAll(list[rank])) {
         if (el.parentElement && el.getBoundingClientRect().width > 0) {
           return { el, rank };
         }
@@ -1419,27 +1764,78 @@
     anchoredRank = Infinity;
   }
 
+  /* What a floating toggle must never sit on. A full-viewport iframe is the
+   * theme editor: from out here it is one opaque element, and whatever we
+   * cover inside it -- the Save button, as it turned out -- is invisible to
+   * every other check. */
+  const INTERACTIVE = 'button, a[href], input, select, textarea, ' +
+    '[role="button"], [role="link"], [role="tab"], [contenteditable=""], ' +
+    '[contenteditable="true"], s-button, s-clickable';
+
+  function spotIsFree(rect, self) {
+    const inset = 3;
+    const points = [
+      [rect.left + rect.width / 2, rect.top + rect.height / 2],
+      [rect.left + inset, rect.top + inset],
+      [rect.right - inset, rect.top + inset],
+      [rect.left + inset, rect.bottom - inset],
+      [rect.right - inset, rect.bottom - inset],
+    ];
+
+    /* Hide ourselves so the hit test reports what is underneath. */
+    const previous = self.style.visibility;
+    self.style.visibility = 'hidden';
+
+    try {
+      for (const [x, y] of points) {
+        const under = document.elementFromPoint(x, y);
+        if (!under) return false;
+        if (under.tagName === 'IFRAME') return false;
+        if (under.closest(INTERACTIVE)) return false;
+      }
+      return true;
+    } finally {
+      self.style.visibility = previous;
+    }
+  }
+
+  /* Right-edge offsets to try, nearest the corner first, stepping left past
+   * whatever cluster sits there. */
+  const FLOAT_STEPS = 8;
+  const FLOAT_STEP_PX = 44;
+
   function placeFloating() {
+    /* Floating is a top-frame fallback only. Inside an app frame there is no
+     * chrome of ours to sit in, and a guessed corner is the app's own. */
+    if (!IS_TOP_FRAME) return false;
+
     const button = buildButton(null);
     paintButton(button);
     button.classList.add('sdm-toggle--floating');
     button.dataset.sdmPlacement = 'floating';
+    document.body.appendChild(button);
 
-    /* Sit just left of whatever top-right cluster exists so the bell and
-     * account menu stay uncovered. */
+    /* Start just left of the top-right control cluster, if any. */
     let leftMost = Infinity;
-    const controls = 'button, a, [role="button"], s-button, s-clickable';
-    for (const el of document.querySelectorAll(controls)) {
+    for (const el of document.querySelectorAll(INTERACTIVE)) {
+      if (el === button) continue;
       const r = el.getBoundingClientRect();
       if (r.width > 0 && r.top >= 0 && r.bottom <= BAR_HEIGHT &&
           r.left > innerWidth * 0.6) {
         leftMost = Math.min(leftMost, r.left);
       }
     }
-    const right = leftMost === Infinity ? 16 : Math.max(16, innerWidth - leftMost + 8);
-    button.style.right = right + 'px';
+    const start = leftMost === Infinity ? 16 : Math.max(16, innerWidth - leftMost + 8);
 
-    document.body.appendChild(button);
+    for (let step = 0; step < FLOAT_STEPS; step++) {
+      button.style.right = (start + step * FLOAT_STEP_PX) + 'px';
+      if (spotIsFree(button.getBoundingClientRect(), button)) return true;
+    }
+
+    /* Nowhere in the bar is free. No in-page toggle beats one that covers a
+     * control -- the popup switch still works. */
+    button.remove();
+    return false;
   }
 
   /* Re-anchoring from the floating fallback is retried only when the
@@ -1494,8 +1890,19 @@
     return false;
   }
 
+  /* A floating toggle checked itself when placed, but the page can change
+   * under it -- the editor opening as a client-side navigation slides a
+   * full-screen iframe over the spot it chose. */
+  function floatingStillFree(button) {
+    return spotIsFree(button.getBoundingClientRect(), button);
+  }
+
   function ensureButton() {
-    if (!IS_TOP_FRAME) return;
+    /* App frames get a toggle only when they carry one of our anchors --
+     * in practice only the theme editor, a full-screen app with its own top
+     * bar and Sidekick button, where the admin around it shows no chrome at
+     * all. Ordinary embedded apps match none and stay untouched. */
+    if (!IS_TOP_FRAME && !IS_APP_FRAME) return;
 
     /* The in-page button is optional: with it off, the popup is the only
      * switch. null means the preference has not been read yet, and a button
@@ -1531,6 +1938,12 @@
         return;
       }
 
+      if (!floatingStillFree(existing)) {
+        removeButton();
+        place();
+        return;
+      }
+
       /* Floating: try to get back to Shopify's chrome when something there
        * has changed since the last attempt failed -- or, on a slow clock,
        * in case what blocked it (a modal) went away without moving it. */
@@ -1546,7 +1959,14 @@
 
     /* No anchor yet: the chrome may still be rendering. waitForTopBar falls
      * back to a floating toggle if nothing recognisable ever shows up. */
-    if (!findAnchor()) return;
+    const found = findAnchor();
+    if (!found) return;
+
+    if (IS_APP_FRAME) {
+      /* No floating fallback inside someone's app: anchored or nothing. */
+      insertAnchored(found);
+      return;
+    }
     place();
   }
 
@@ -1652,6 +2072,7 @@
 
     if (usesPolarisTheme()) {
       applyNestedLightScopes();
+      applyInlineTokenScopes();
       /* Deep query on the toggle itself: it is a one-off, and turning dark
        * mode off has to reach every provider we ever switched. */
       applyProviders(deepQuery(PROVIDER));
@@ -1671,9 +2092,11 @@
   /* Cheap work runs on every batch; the deep contrast scan is throttled
    * separately because it is the only part that touches layout. */
   function refreshFast() {
+    syncRoot();
     /* Only meaningful where Shopify's own theming exists to be flipped. */
     if (usesPolarisTheme()) {
       applyNestedLightScopes();
+      applyInlineTokenScopes();
       applyProviders(lightDomProviders());
     }
 
@@ -1684,8 +2107,8 @@
       /* Runs every frame rather than on the throttled guard, so a freshly
        * mounted metrics bar is dark on the frame it appears. */
       if (enabled) applySeeds();
-      ensureButton();
     }
+    ensureButton();
   }
 
   const GUARD_INTERVAL = 500;
@@ -1773,11 +2196,9 @@
   function start() {
     /* Stylesheets have loaded by now, so the Polaris tokens are finally
      * visible and the page can pick its theming path. */
-    if (IS_APP_FRAME && detectPolaris()) {
-      isPolarisFrame = true;
-    }
-
-    if (usesPolarisTheme()) {
+    if (maybeBecomePolaris()) {
+      /* Already fully applied. */
+    } else if (usesPolarisTheme()) {
       darkThemeClasses = detectDarkThemeClasses();
       lastSheetCount = document.styleSheets.length;
       applyRootClasses();
@@ -1817,9 +2238,53 @@
 
   /* Shopify's router rewrites <html>'s class on some navigations, which would
    * silently drop dark mode mid-session. */
-  new MutationObserver(() => {
+  const rootObserver = new MutationObserver(() => {
+    /* Shopify setting its theme class is the frame announcing itself. */
+    if (maybeBecomePolaris()) return;
     if (rootClassesDrifted()) applyRootClasses();
-  }).observe(root, { attributes: true, attributeFilter: ['class'] });
+  });
+  rootObserver.observe(root, { attributes: true, attributeFilter: ['class'] });
+
+  function syncRoot() {
+    if (document.documentElement === root || !document.documentElement) return;
+
+    root = document.documentElement;
+    rootObserver.disconnect();
+    rootObserver.observe(root, { attributes: true, attributeFilter: ['class'] });
+
+    /* The new <html> arrives with none of our classes, and possibly a new
+     * <body> that the main observer is not watching. */
+    applyRootClasses();
+    if (document.body) {
+      observer.observe(document.body, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ['colorscheme', 'class'],
+      });
+    }
+    judged.clear();
+    schedule();
+  }
+
+  /* <html> being swapped out is a childList change on the document itself. */
+  new MutationObserver(syncRoot).observe(document, { childList: true });
+
+  /* Development only. The published manifest has no background worker, so
+   * this listener is never installed outside a local build -- see
+   * the gitignored local setup that adds a reload worker. It lets a page-level script ask
+   * the extension to reload itself after an edit. */
+  try {
+    if (IS_TOP_FRAME && chrome.runtime.getManifest().background) {
+      window.addEventListener('message', (event) => {
+        if (event.source !== window || !event.data) return;
+        if (event.data.type !== 'sdm:dev-reload') return;
+        chrome.runtime.sendMessage({ type: 'sdm:dev-reload' });
+      });
+    }
+  } catch (e) {
+    /* No extension context. */
+  }
 
   /* App frames have no synchronous mirror to read, and the admin re-syncs in
    * case the setting was changed in another tab. */
