@@ -1298,6 +1298,14 @@
 
     publishDarkTokens();
 
+    /* A framework that hydrates <head> (React Router, Remix) drops nodes it
+     * did not render, our suffixed-token <style> included -- an app's
+     * headings went back to light-mode ink a beat after load. Put it back. */
+    if (IS_APP_FRAME && tokenSuffixes.size && darkTokens &&
+        !(suffixStyle && suffixStyle.isConnected && suffixStyle.textContent)) {
+      applySuffixedTokens();
+    }
+
     /* A stylesheet that arrives after an element was judged changes what it
      * looks like, but not the seen-set: Pop Convert's Vue chunk paints its
      * menu items white after the first pass had already measured them
@@ -2069,6 +2077,13 @@
     writePreference(value);
 
     applyRootClasses();
+
+    /* An app frame learns it is dark from storage, often *after* the dark
+     * tokens and the component suffixes have already arrived -- at which
+     * point applySuffixedTokens() had bailed on `enabled` being false and
+     * nothing called it again. An app's headings stayed light-mode #303030
+     * on a dark card for exactly that reason. */
+    applySuffixedTokens();
 
     if (usesPolarisTheme()) {
       applyNestedLightScopes();
